@@ -1,0 +1,1756 @@
+---
+title: "ITS and 16S metabarcoding Fukushima experiment"
+author: "Rik Verdonck"
+
+output:
+  bookdown::html_document2:
+    #html_document:
+    toc: yes
+    number_sections: yes
+    mode: selfcontained
+    code_folding: show
+
+date: "`r Sys.Date()`"
+
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Step 1 : preliminaries
+
+Load some libraries. Mostly the same as in original script except for: 
+
+* KableExtra for rendering this document
+* kmer for calculating k-mer based distances between sequences
+* vegan for additional distance metrics such as bray-curtis
+* compositions for the transformations of count matrices
+
+
+```{r preliminaries, eval=T, echo=T, cache=F, message=FALSE}
+library("ggplot2")
+library("kableExtra") # This is just for rendering this html. 
+library("tinytex")
+library("dada2")
+library("ShortRead")
+library("Biostrings")
+library("data.table")
+library("biomformat")
+library("DECIPHER")
+library("phyloseq")
+library("msa")
+library("kmer")
+library("vegan")
+library("compositions")
+library("htmltools")
+library("foreach")
+library("doParallel")
+```
+
+```{r load session, eval=T, echo=F, cache=T, cache.lazy = FALSE, message=FALSE}
+# load("~/fukushima/metabarcoding/jan2.RData")
+# load("~/fukushima/metabarcoding/both_3may.RDat")
+# load("~/fukushima/metabarcoding/both_6may.RDat")
+# load("~/fukushima/metabarcoding/both_7may.RDat")
+# load("analysis_metagenomics_fukushima_20240507.RData")
+```
+
+First I generate two objects that will harbour all intermediate steps and auxiliary variables for each dataset.
+I also generate a list for all custom functions. 
+
+```{r generate main lists, echo=T,  eval=F}
+setwd("/home/rik/fukushima/metabarcoding.git")
+XITS <- list()
+X16S <- list()
+FUNS <- list()
+source("functions.R")
+```
+
+
+Read in the data paths. Obviously adapted to my computer. 
+
+```{r data input, echo=T,  eval=F}
+XITS$path <-"~/fukushima/metabarcoding.git/HN00198716/ITS"
+X16S$path <-"~/fukushima/metabarcoding.git/HN00198716/16S"
+
+XITS$fnFs <- sort(list.files(XITS$path, pattern = "_1.fq.gz", full.names = TRUE))
+length(XITS$fnFs)
+XITS$fnRs <- sort(list.files(XITS$path, pattern = "_2.fq.gz", full.names = TRUE))
+length(XITS$fnRs)
+
+X16S$fnFs <- sort(list.files(X16S$path, pattern = "_1.fq.gz", full.names = TRUE))
+length(X16S$fnFs)
+X16S$fnRs <- sort(list.files(X16S$path, pattern = "_2.fq.gz", full.names = TRUE))
+length(X16S$fnRs)
+
+# Extract all sample names:
+XITS$sample.names    <- unname(sapply(XITS$fnFs, FUNS$get.sample.name))
+XITS$sample.names[XITS$sample.names == "mock"] <- c("mockITS","mockITS1")
+X16S$sample.names    <- unname(sapply(X16S$fnFs, FUNS$get.sample.name))
+X16S$sample.names[X16S$sample.names == "mock"] <- c("mock16S","mock16S1")
+sample.names         <- unique(c(XITS$sample.names,X16S$sample.names))
+
+
+META           <- read.table("~/fukushima/metabarcoding.git/metadata.csv",sep=",",dec=".",header=T)[,1:7]
+rownames(META) <- META$library
+# Here I define 5 colors that we will use throughout for site, used for the levels 
+# "Arakawa", "Futaba", "Okuma", "Tsushima" and "University" 
+# I will relevel META to put them in a more logical order as well. 
+META$site <- factor(META$site,levels=c("University", "Arakawa", "Tsushima", "Okuma", "Futaba"))
+sitecolors     <- c("#ADD8E6","#2E8B57","#FF7F50","#FF91A4","#800020")
+
+XITS$META <- META[match(XITS$sample.names, META$library), ]
+X16S$META <- META[match(X16S$sample.names, META$library), ]
+
+```
+
+
+
+
+## Step 2: initial quality checks
+Here I advise to plot quality profiles of the same run, FW and RV next to each other. 
+I also analyzed all files with fastQC, and compiled them in a summary report using multiQC. All these summary reports show more or less the same statistics, so it's up to personal preference which one you prefer to use. But you should actually go through a round of thorough checking for all libraries. 
+
+
+```{r quality profiles, echo=T,  eval=T, fig.width=10, fig.height=6, cache = T}
+# This is the loop that you can use to generate all 46 quality profiles:
+#for (i in 1:46){plotQualityProfile(c(fnFs[i],fnRs[i]))}
+
+# Example: 
+plotQualityProfile(c(XITS$fnFs[16],XITS$fnRs[16]))
+plotQualityProfile(c(X16S$fnFs[16],X16S$fnRs[16]))
+```
+
+
+## Step 3 : getting rid of primers and N base calls
+In all cases, >99% of sequences are retained. **Question: when were the PhiX reads filtered out?**
+
+Primers are present and already confirmed by fastQC. At first sight, there seems to be no need to turn them in all directions, but I agree it's always better safe than sorry. So we do check for primers in all orientations. 
+
+```{r check primers, echo=T,  eval=F}
+
+XITS$FWD <- "GTGARTCATCGARTCTTTGAA"
+XITS$REV <- "TCCTCCGCTTATTGATATGC" 
+
+X16S$FWD <- "CCTACGGGNGGCWGCAG"
+X16S$REV <- "GACTACHVGGGTATCTAATCC" 
+
+XITS$FWD.orients <- FUNS$allOrients(XITS$FWD)
+XITS$REV.orients <- FUNS$allOrients(XITS$REV)
+
+X16S$FWD.orients <- FUNS$allOrients(X16S$FWD)
+X16S$REV.orients <- FUNS$allOrients(X16S$REV)
+
+XITS$fnFs.filtN  <- file.path(XITS$path, "filtN", basename(XITS$fnFs)) 
+XITS$fnRs.filtN  <- file.path(XITS$path, "filtN", basename(XITS$fnRs))
+
+X16S$fnFs.filtN  <- file.path(X16S$path, "filtN", basename(X16S$fnFs)) 
+X16S$fnRs.filtN  <- file.path(X16S$path, "filtN", basename(X16S$fnRs))
+
+
+# Our first filtering step using the filterAndTrim function is really just getting rid of sequences containing N nucleotides, and PhiX. 
+# About the multithread parameter: only use this if your computer allows parallel processing. 
+XITS$out <- filterAndTrim(XITS$fnFs, XITS$fnFs.filtN, XITS$fnRs, XITS$fnRs.filtN, maxN = 0, matchIDs=T, rm.phix=T, multithread = 12)
+X16S$out <- filterAndTrim(X16S$fnFs, X16S$fnFs.filtN, X16S$fnRs, X16S$fnRs.filtN, maxN = 0, matchIDs=T, rm.phix=T, multithread = 12)
+
+
+# For ITS:
+XITS$primersummary <- FUNS$generate_primer_summary(XITS, "fnFs.filtN", "fnRs.filtN", multithread = 12)
+
+# For 16S:
+X16S$primersummary <- FUNS$generate_primer_summary(X16S, "fnFs.filtN", "fnRs.filtN", multithread = 12)
+
+```
+
+
+
+
+
+
+```{r primer summary ITS 1, echo=F,  eval=T}
+XITS$primersummary %>%
+  kbl() %>%
+  kable_minimal(font_size = 10) %>%
+  scroll_box(width = "100%", height = "200px")
+```
+
+```{r primer summary 16S 1, echo=F,  eval=T}
+X16S$primersummary %>%
+  kbl() %>%
+  kable_minimal(font_size = 10) %>%
+  scroll_box(width = "100%", height = "200px")
+```
+
+
+
+In this table, you can sporadically spot the odd badly oriented primer, but it's such a small fraction of the dataset (e.g. in A9T) , that I would not bother trying to filter those out. Readthrough however, seems to be pretty common. Here I calculate the percentage readthrough for all libraries:
+
+
+```{r check readthrough, echo=T,  eval=F}
+
+# For ITS
+XITS$proportion_revcomp_fw <- XITS$primersummary[,8]/XITS$primersummary[,1]
+XITS$proportion_revcomp_rv <- XITS$primersummary[,12]/XITS$primersummary[,13]
+
+# For 16S
+X16S$proportion_revcomp_fw <- X16S$primersummary[,8]/X16S$primersummary[,1]
+X16S$proportion_revcomp_rv <- X16S$primersummary[,12]/X16S$primersummary[,13]
+
+```
+
+
+
+
+```{r plot readthrough ITS, echo=T,  eval=T, fig.width=10, fig.height=6}
+
+plot(XITS$proportion_revcomp_fw,XITS$proportion_revcomp_rv,log="xy",col="white",cex=0.75, main = "ITS: proportion of reads with readthrough of the entire primer")
+text(XITS$proportion_revcomp_fw,XITS$proportion_revcomp_rv,labels=sample.names,cex=0.75)
+
+```
+```{r plot readthrough 16S, echo=T,  eval=T, fig.width=10, fig.height=6}
+
+plot(X16S$proportion_revcomp_fw + 1e-06 ,X16S$proportion_revcomp_rv + 1e-06 , log="xy",col="white",cex=0.75, main = "16S: proportion of reads with readthrough of the entire primer")
+text(X16S$proportion_revcomp_fw + 1e-06 ,X16S$proportion_revcomp_rv + 1e-06 , labels=sample.names,cex=0.75)
+
+```
+
+There is virtually no readthrough for the 16S samples, and when there is some, it's correlated between forward and reverse. I had to add a small quantity to the 16S counts in order to correct for zeros. 
+
+For ITS, in the forward libraries, the proportion ranges from 0.5% to 25%. In the reverse libraries, it's between 0.9% and 42%. The plot shows that forward and reverse are correlated, as expected.  
+Samples C5T and C6T are clearly outliers in this respect, with very few detected readthroughs.
+What we can tentatively conclude for ITS at this point:
+
+* Some libraries are dominated by shorter inserts and others by longer ones.
+* Given the substantial proportion of readthrough in most libraries, we can conclude that most inserts are shorter than 300 bp, which is lower than the expected fragment length of ~370 bp for basidiomycetes. **This should be checked**. 
+* Something is off in C5T and C6T. Perhaps base call quality is so bad that primers are not detected?
+
+
+
+Next step is cutadapt. I installed this on my local machine, and ran it via a system call:
+
+```{r cutadapt, echo=T,  eval=F}
+
+cutadapt <- "/usr/bin/cutadapt" 
+system2(cutadapt, args = "--version")
+
+# Generate a subdirectory that will contain the cutadapt trimmed files
+XITS$path.cut <- file.path(XITS$path, "cutadapt"); if(!dir.exists(XITS$path.cut)) dir.create(XITS$path.cut)
+X16S$path.cut <- file.path(X16S$path, "cutadapt"); if(!dir.exists(X16S$path.cut)) dir.create(X16S$path.cut)
+
+XITS$fnFs.cut <- file.path(XITS$path.cut, basename(XITS$fnFs))
+XITS$fnRs.cut <- file.path(XITS$path.cut, basename(XITS$fnRs))
+
+X16S$fnFs.cut <- file.path(X16S$path.cut, basename(X16S$fnFs))
+X16S$fnRs.cut <- file.path(X16S$path.cut, basename(X16S$fnRs))
+
+XITS$FWD.RC <- dada2:::rc(XITS$FWD)
+XITS$REV.RC <- dada2:::rc(XITS$REV)
+
+X16S$FWD.RC <- dada2:::rc(X16S$FWD)
+X16S$REV.RC <- dada2:::rc(X16S$REV)
+
+# Trim FWD and the reverse-complement of REV off of R1 (forward reads)
+XITS$R1.flags <- paste("-g", XITS$FWD, "-a", XITS$REV.RC) 
+# Trim REV and the reverse-complement of FWD off of R2 (reverse reads)
+XITS$R2.flags <- paste("-G", XITS$REV, "-A", XITS$FWD.RC)
+
+# Trim FWD and the reverse-complement of REV off of R1 (forward reads)
+X16S$R1.flags <- paste("-g", X16S$FWD, "-a", X16S$REV.RC) 
+# Trim REV and the reverse-complement of FWD off of R2 (reverse reads)
+X16S$R2.flags <- paste("-G", X16S$REV, "-A", X16S$FWD.RC)
+
+
+# Run Cutadapt for ITS
+for(i in seq_along(XITS$fnFs)) {
+  system2("cutadapt", args = c(XITS$R1.flags, XITS$R2.flags, "-n", 2, # -n 2 required to remove FWD and REV from reads
+                             "-o", XITS$fnFs.cut[i], "-p", XITS$fnRs.cut[i], # output files
+                             XITS$fnFs.filtN[i], XITS$fnRs.filtN[i])) # input files
+}
+
+
+# Run Cutadapt for 16S
+for(i in seq_along(X16S$fnFs)) {
+  system2("cutadapt", args = c(X16S$R1.flags, X16S$R2.flags, "-n", 2, # -n 2 required to remove FWD and REV from reads
+                             "-o", X16S$fnFs.cut[i], "-p", X16S$fnRs.cut[i], # output files
+                             X16S$fnFs.filtN[i], X16S$fnRs.filtN[i])) # input files
+}
+
+
+
+# For ITS:
+XITS$primersummary.2 <- FUNS$generate_primer_summary(XITS, "fnFs.cut", "fnRs.cut")
+# For 16S:
+X16S$primersummary.2 <- FUNS$generate_primer_summary(X16S, "fnFs.cut", "fnRs.cut")
+
+
+```
+
+```{r primer summary 2 ITS, echo=F,  eval=T}
+XITS$primersummary.2 %>%
+  kbl() %>%
+  kable_minimal(font_size = 10) %>%
+  scroll_box(width = "100%", height = "200px")
+```
+
+```{r primer summary 2 16S, echo=F,  eval=T}
+X16S$primersummary.2 %>%
+  kbl() %>%
+  kable_minimal(font_size = 10) %>%
+  scroll_box(width = "100%", height = "200px")
+```
+
+Now you can see the primers have gone, except for the sporadic badly oriented primer. 
+
+
+
+
+
+## Step 4 : Trimmomatic
+Trimmomatic has multiple important parameters:
+
+* LEADING, TRAILING etc: the quality trimmer chews on both sides of the read until it encounters a base call above set Phred scores
+* SLIDINGWINDOW: the quality trimmer calculates the average Phred score over a sliding window, and removes the entire trailing end after the first encounter of an average phred score below the cut-off
+* MINLEN: after trimming, only reads above MINLEN will be retained. 
+
+This part has taken me quite some optimization. When we go too stringent, the reads end up too small. At first sight this is not a problem, but then afterwards when pairs have to get merged, they don't have sufficient overlap anymore. So the parameters I end up using here, are stringent enough to generally exclude shitty base calls, but leave reads of sufficient length for merging. If afterwards it would turn out we get rid of samples C5T and U3T, we can crank up the stringency. 
+
+```{r Trimmomatic ITS, echo=T,  eval=F}
+# Forward and reverse fastq filenames have the format:
+XITS$cutFs <- sort(list.files(XITS$path.cut, pattern = "_1.fq.gz", full.names = TRUE))
+XITS$cutRs <- sort(list.files(XITS$path.cut, pattern = "_2.fq.gz", full.names = TRUE))
+
+dir.create(file.path(XITS$path.cut, "trim_paired"))
+dir.create(file.path(XITS$path.cut, "trim_unpaired"))
+XITS$trimFs_paired   <- file.path(XITS$path.cut, "trim_paired", basename(XITS$cutFs))
+XITS$trimFs_unpaired <- file.path(XITS$path.cut, "trim_unpaired", basename(XITS$cutFs))
+XITS$trimRs_paired   <- file.path(XITS$path.cut, "trim_paired", basename(XITS$cutRs))
+XITS$trimRs_unpaired <- file.path(XITS$path.cut, "trim_unpaired", basename(XITS$cutRs))
+
+for(i in 1:length(sample.names))
+{  
+command <- paste(c("java -jar ~/Trimmomatic-0.39/trimmomatic-0.39.jar PE",
+XITS$cutFs[i],
+XITS$cutRs[i],
+XITS$trimFs_paired[i],
+XITS$trimFs_unpaired[i],
+XITS$trimRs_paired[i],
+XITS$trimRs_unpaired[i],
+"LEADING:0 TRAILING:25 SLIDINGWINDOW:4:25 MINLEN:100"),collapse=" ")
+
+system(command) # This is actually the call to execute the Trimmomatic call outlined above
+}
+
+```
+
+
+
+```{r Trimmomatic 16S, echo=T,  eval=F}
+# Forward and reverse fastq filenames have the format:
+X16S$cutFs <- sort(list.files(X16S$path.cut, pattern = "_1.fq.gz", full.names = TRUE))
+X16S$cutRs <- sort(list.files(X16S$path.cut, pattern = "_2.fq.gz", full.names = TRUE))
+
+dir.create(file.path(X16S$path.cut, "trim_paired"))
+dir.create(file.path(X16S$path.cut, "trim_unpaired"))
+X16S$trimFs_paired   <- file.path(X16S$path.cut, "trim_paired", basename(X16S$cutFs))
+X16S$trimFs_unpaired <- file.path(X16S$path.cut, "trim_unpaired", basename(X16S$cutFs))
+X16S$trimRs_paired   <- file.path(X16S$path.cut, "trim_paired", basename(X16S$cutRs))
+X16S$trimRs_unpaired <- file.path(X16S$path.cut, "trim_unpaired", basename(X16S$cutRs))
+
+for(i in 1:length(sample.names))
+{  
+command <- paste(c("java -jar ~/Trimmomatic-0.39/trimmomatic-0.39.jar PE",
+X16S$cutFs[i],
+X16S$cutRs[i],
+X16S$trimFs_paired[i],
+X16S$trimFs_unpaired[i],
+X16S$trimRs_paired[i],
+X16S$trimRs_unpaired[i],
+"LEADING:0 TRAILING:25 SLIDINGWINDOW:4:25 MINLEN:100"),collapse=" ")
+
+system(command) # This is actually the call to execute the Trimmomatic call outlined above
+}
+
+```
+
+
+Also here, you should go through all of them. 
+```{r quality profiles 2, echo=T,  eval=T, fig.width=10, fig.height=6}
+plotQualityProfile(c(XITS$trimFs_paired[5],XITS$trimRs_paired[5]))
+plotQualityProfile(c(X16S$trimFs_paired[5],X16S$trimRs_paired[5]))
+
+```
+
+
+## Step 5 : the real filterAndTrim
+This is a last filtering step, not very necessary anymore after Trimmomatic, but we go for it anwyay. The most important additional trimming happens on the total expected errors per read. With a maximum of 0.5 expected errors per read, we should be on the safe side. However, in my experience you can go down much lower (like < 0.05 easily) if your trimmomatic is more stringent. However, you will not be able to merge a lot of reads in C5T and U3T for the ITS. 
+
+Notice we are only working with the reads that came out of Trimmomatic as intact pairs. The reads that got orphaned, are not taken along the rest of the analysis. 
+
+
+```{r filterAndTrim 2, echo=T,  eval=F}
+
+XITS$filtFs <- file.path(XITS$path.cut, "filtered", basename(XITS$cutFs))
+XITS$filtRs <- file.path(XITS$path.cut, "filtered", basename(XITS$cutRs))
+
+XITS$out <- filterAndTrim(XITS$trimFs_paired, XITS$filtFs, XITS$trimRs_paired, XITS$filtRs, 
+                     maxN = 0, 
+                     maxEE = c(0.5,0.5), 
+                     truncQ = 2, 
+                     minLen = 100, 
+                     rm.phix = TRUE, 
+                     matchIDs=T, 
+                     compress = TRUE, 
+                     multithread = 12) 
+
+
+# Same for 16S
+
+X16S$filtFs <- file.path(X16S$path.cut, "filtered", basename(X16S$cutFs))
+X16S$filtRs <- file.path(X16S$path.cut, "filtered", basename(X16S$cutRs))
+
+X16S$out <- filterAndTrim(X16S$trimFs_paired, X16S$filtFs, X16S$trimRs_paired, X16S$filtRs, 
+                     maxN = 0, 
+                     maxEE = c(0.5,0.5), 
+                     truncQ = 2, 
+                     minLen = 100, 
+                     rm.phix = TRUE, 
+                     matchIDs=T, 
+                     compress = TRUE, 
+                     multithread = 12) 
+
+
+```
+
+
+## Step 6: The DADA2 functions
+Detailed info about these functions can be found in the dada2 documentation. We start with learning the error profiles. nbases is set high enough so the entire dataset should be used for training. 
+
+```{r learn errors, echo=T,  eval=F}
+
+XITS$errF <- learnErrors(XITS$filtFs, multithread = 12, nbases= 1e+10)
+XITS$errR <- learnErrors(XITS$filtRs, multithread = 12, nbases= 1e+10)
+X16S$errR <- learnErrors(X16S$filtFs, multithread = 12, nbases= 1e+10)
+X16S$errR <- learnErrors(X16S$filtRs, multithread = 12, nbases= 1e+10)
+
+
+```
+
+We can plot the observed error profile for each transition/transversion and compare to theoretical values.
+I used these plots a lot for the optimization of the filtering parameters. 
+
+
+### Error profiles for ITS, forward and reverse:
+```{r plot errors ITS, echo=T,  eval=T,fig.width=8, fig.height=8, warning=F}
+
+plotErrors(XITS$errF, nominalQ=TRUE)
+plotErrors(XITS$errR, nominalQ=TRUE)
+
+
+```
+
+### Error profiles for 16S, forward and reverse:
+```{r plot errors 16S, echo=T,  eval=T,fig.width=8, fig.height=8, warning=F}
+
+
+plotErrors(X16S$errR, nominalQ=TRUE)
+plotErrors(X16S$errR, nominalQ=TRUE)
+
+```
+
+
+For 16S they don't look super good. It does not seem to be a major concern (see [here](https://github.com/benjjneb/dada2/issues/1477)). We may want to look if additional trimming or filtering improves the error profiles, but I currently don't consider it a priority. 
+
+
+Next we move on with dereplication, and the real dada function:
+
+```{r dada2 functions, echo=T,  eval=F}
+
+XITS$derepFs  <- derepFastq(XITS$filtFs, verbose=TRUE)
+XITS$derepRs  <- derepFastq(XITS$filtRs, verbose=TRUE)
+# Name the derep-class objects by the sample names
+names(XITS$derepFs)  <- XITS$sample.names
+names(XITS$derepRs) <- XITS$sample.names
+
+X16S$derepFs <- derepFastq(X16S$filtFs, verbose=TRUE)
+X16S$derepRs <- derepFastq(X16S$filtRs, verbose=TRUE)
+names(X16S$derepFs) <- X16S$sample.names
+names(X16S$derepRs) <- X16S$sample.names
+
+
+XITS$dadaFs <- dada(XITS$derepFs, err=XITS$errF, multithread=12)
+XITS$dadaRs <- dada(XITS$derepRs, err=XITS$errR, multithread=12)
+
+X16S$dadaFs <- dada(X16S$derepFs, err=X16S$errR, multithread=12)
+X16S$dadaRs <- dada(X16S$derepRs, err=X16S$errR, multithread=12)
+
+XITS$mergers <- mergePairs(XITS$dadaFs, XITS$derepFs, XITS$dadaRs, XITS$derepRs, verbose=TRUE, maxMismatch=1)
+XITS$seqtab  <- makeSequenceTable(XITS$mergers)
+table(nchar(getSequences(XITS$seqtab)))
+plot(table(nchar(getSequences(XITS$seqtab))))
+XITS$seqtab.nochim <- removeBimeraDenovo(XITS$seqtab, method="consensus", multithread=16, verbose=TRUE)
+
+X16S$mergers <- mergePairs(X16S$dadaFs, X16S$derepFs, X16S$dadaRs, X16S$derepRs, verbose=TRUE, maxMismatch=1)
+X16S$seqtab  <- makeSequenceTable(X16S$mergers)
+table(nchar(getSequences(X16S$seqtab)))
+plot(table(nchar(getSequences(X16S$seqtab))))
+X16S$seqtab.nochim <- removeBimeraDenovo(X16S$seqtab, method="consensus", multithread=16, verbose=TRUE)
+
+```
+
+
+A bimera is a two-parent chimera, in which the left side is made up of one parent sequence, and the right-side made up of a second parent sequence. 
+
+For ITS, we identified 142 bimeras out of 4954 input sequences. Nothing to worry about. 
+For 16S, we identified 1987 bimeras out of 11820 input sequences, for 16S. That's almost 17%, which is a lot. Not sure if we can do a lot about it. It's something that typically happens during the PCR phase. What would worry me more is that they are perhaps false positive bimera's. Anyhow, for now they are just removed for the remainder of the analysis, which is certainly the safest option. 
+
+
+
+Now reads have been filtered, errors have been learned, doubles have been dereplicated, dada has been executed, reads have been merged and chimeras have been removed. Let's summarise this in a table.
+
+
+```{r generate track, echo=T,  eval=F}
+XITS$track <- cbind(XITS$out, sapply(XITS$dadaFs, FUNS$getN), sapply(XITS$dadaRs, FUNS$getN), sapply(XITS$mergers, FUNS$getN), rowSums(XITS$seqtab.nochim))
+X16S$track <- cbind(X16S$out, sapply(X16S$dadaFs, FUNS$getN), sapply(X16S$dadaRs, FUNS$getN), sapply(X16S$mergers, FUNS$getN), rowSums(X16S$seqtab.nochim))
+
+# If processing a single sample, remove the sapply calls: e.g. replace sapply(dadaFs, FUNS$getN) with FUNS$getN(dadaFs)
+colnames(XITS$track) <- c("input", "filtered", "denoisedF", "denoisedR", "merged", "nonchim")
+colnames(X16S$track) <- c("input", "filtered", "denoisedF", "denoisedR", "merged", "nonchim")
+
+rownames(XITS$track) <- XITS$sample.names
+rownames(X16S$track) <- X16S$sample.names
+
+```
+
+### Summary of read numbers throughout filtering for ITS:
+```{r print track ITS, echo=F,  eval=T}
+colnames(XITS$track) <- c("input", "filtered", "denoisedF", "denoisedR", "merged", "nonchim")
+rownames(XITS$track) <- XITS$sample.names
+
+XITS$track %>%
+  kbl() %>%
+  kable_minimal(font_size = 12) %>%
+  scroll_box(width = "100%", height = "200px")
+```
+
+
+### Summary of read numbers throughout filtering For 16S
+```{r print track 16S, echo=F,  eval=T}
+colnames(X16S$track) <- c("input", "filtered", "denoisedF", "denoisedR", "merged", "nonchim")
+rownames(X16S$track) <- X16S$sample.names
+
+X16S$track %>%
+  kbl() %>%
+  kable_minimal(font_size = 12) %>%
+  scroll_box(width = "100%", height = "200px")
+```
+
+
+
+Notice that this workflow has been optimized to retain as many read pairs as possible. This has been a deliberate choice in order to prevent biases. However, we may want to repeat some things with more stringent criteria. This depends on whether we decide to keep all samples on board. 
+
+
+
+
+
+
+
+## Step 7 : Mock communities
+We have observed that our mock communities dominate the first dimension of MDS (not shown), which is expected. First, we take a look at sequences that are unique to our mock communities: 
+
+```{r subset mocks, echo=T,  eval=F, cache=T}
+# Subset seqtab.nochim to only contain the mocks
+XITS$mocks <- XITS$seqtab.nochim[grepl("mock",rownames(XITS$seqtab.nochim)),]
+X16S$mocks <- X16S$seqtab.nochim[grepl("mock",rownames(X16S$seqtab.nochim)),]
+
+# Check which sequences get at least one count in either mock 1 or mock 2: 
+unname(which(XITS$mocks[1,] > 0 | XITS$mocks[2,] > 0))
+unname(which(X16S$mocks[1,] > 0 | X16S$mocks[2,] > 0))
+
+# Retrieve the sequences that correspond to these ASV's
+XITS$mock_sequences <- colnames(XITS$mocks)[unname(which(XITS$mocks[1,] > 0 | XITS$mocks[2,] > 0))]
+X16S$mock_sequences <- colnames(X16S$mocks)[unname(which(X16S$mocks[1,] > 0 | X16S$mocks[2,] > 0))]
+
+# You can use these to check whether you find all taxons that you expect in your mocks, and whether you find something that you did not intend to include. 
+# Next, you can check how many times you find sequences from your mock in other samples: 
+XITS$mocks_table           <- XITS$seqtab.nochim[,unname(which(XITS$mocks[1,] > 0 | XITS$mocks[2,] > 0))]
+colnames(XITS$mocks_table) <- paste ("sequence",1:ncol(XITS$mocks_table))
+
+X16S$mocks_table           <- X16S$seqtab.nochim[,unname(which(X16S$mocks[1,] > 0 | X16S$mocks[2,] > 0))]
+colnames(X16S$mocks_table) <- paste ("sequence",1:ncol(X16S$mocks_table))
+```
+
+
+Check the taxonomy of the mock samples. Notice that this is not the most efficient way of doing this, given that it takes a long time to load the references in RAM, and we will repeat this afterwards for the other samples. 
+```{r mocks taxonomy, echo=T,  eval=F, cache=T}
+
+X16S$mocks_taxa <- assignTaxonomy(X16S$mock_sequences,"/home/rik/fukushima/metabarcoding/silva_nr99_v138.1_wSpecies_train_set.fa.gz",verbose=T,multithread=10)
+XITS$mocks_taxa <- assignTaxonomy(XITS$mock_sequences,"/home/rik/fukushima/metabarcoding/sh_general_release_dynamic_s_all_04.04.2024.fasta",verbose=T,multithread=10)
+
+```
+
+
+**To be checked**: for ITS, mock sequences 1 and sequence 6 occur in non-mock samples. 
+
+
+### ITS mock sequences:
+```{r print mock table ITS, echo=F,  eval=T, cache=T}
+XITS$mocks_table %>%
+  kbl() %>%
+  kable_minimal(font_size = 10) %>%
+  scroll_box(width = "100%", height = "200px")
+
+```
+
+### ITS mock taxonomy:
+Don't forget to scroll to the right!
+```{r print mock taxonomy ITS, echo=F,  eval=T, cache=T}
+
+XITS$mocks_taxa %>%
+  kbl() %>%
+  kable_minimal(font_size = 10) %>%
+  scroll_box(width = "100%", height = "200px")
+
+
+```
+
+### 16S mock sequences:
+```{r print mock table 16S, echo=F,  eval=T, cache=T}
+
+X16S$mocks_table %>%
+  kbl() %>%
+  kable_minimal(font_size = 10) %>%
+  scroll_box(width = "100%", height = "200px")
+
+```
+
+### 16S mock taxonomy:
+Don't forget to scroll to the right!
+
+```{r print mock taxonomy 16S, echo=F,  eval=T, cache=T}
+
+X16S$mocks_taxa %>%
+  kbl() %>%
+  kable_minimal(font_size = 10) %>%
+  scroll_box(width = "100%", height = "200px")
+
+```
+
+
+
+
+
+
+
+
+## Step 8 : some cleaning and reducing of the data:
+### Not so important for now: some filtering in ITS
+We have found 4812 unique sequences, which is an awful lot. Many of them look alike, which I presume is mostly due to evolutionary relationships, but which is sometimes also due presence of some unrecognized bits of primers. I will cluster sequences using 5-mer distances, and if sequences look extremely similar, I may merge some.
+
+Furthermore, some other unexpected sequences are present, which we filter out as well.  
+
+One thing I noticed, is that on rare occasions, sequences are actually virtually the same, except for a primer part that has not been recognized because its not similar enough to the primer sequences we gave for filtering. I inferred this from 5-mer distances (see below), and just want to show one example as an illustration here:
+
+```{r example retained primer, echo=T,  eval=T}
+seqs4 <- DNAStringSet(x=colnames(XITS$seqtab.nochim)[c(1,2563,2611,3097)])
+aln4  <- msa(seqs4)
+```
+
+For now I don't manage to output the alignment. Don't bother. 
+
+```{r print example MSA, results="asis",echo=T, output="latex"}
+#knitr::raw_latex(msaPrettyPrint(x= aln4 , output="asis"))
+
+knitr::pandoc_to()
+
+#knitr::raw_latex(msaPrettyPrint(x= aln4 , output="asis"))
+
+knitr::raw_latex("\\emph{some text}")
+
+
+
+#knitr::asis_output(msaPrettyPrint(x= aln4 , output="asis"))
+```
+
+
+
+If we look how often these are counted, we observe that in this case, there clearly is a main variant (variant 1). Variant 2 is just a SNP away from variant 1, which may well reflect a natural situation. It occurs in only one sample (A4T) and given its close proximity to variant 1 and its low frequency compared to the main variant, it can easily be "collapsed" with variant 1.  
+
+Variants 3 and 4 also occur in small numbers in single samples, but their origin is less clear to me. If they are a sequencing artifact, it's worrisome that they occur in 38 and 25 copies. If they would just be a natural variant of the primer binding region, there is less reason to worry and they can be collapsed with variant 1 as well. **BUT THIS HAS TO BE CHECKED**
+
+```{r generate close variant table 1, echo=T,  eval=F, cache=T}
+unname(XITS$seqtab.nochim[,c(1,2563,2611,3097)])
+```
+```{r print close variant table 1, echo=F,  eval=T, cache=T}
+close_variants1           <- XITS$seqtab.nochim[,c(1,2563,2611,3097)]
+colnames(close_variants1) <- paste("variant",1:4)
+  
+close_variants1 %>%
+  kbl() %>%
+  kable_minimal(font_size = 10) %>%
+  scroll_box(width = "50%", height = "200px")
+```
+
+
+Another way to look at it, is to check the last couple of nucleotides of our sequences. They should almost invariably read "CTTAA" for ITS, and "AAACA" for 16S
+```{r show substring right, echo=T,  eval=T, cache=T}
+
+table(unlist(lapply(colnames(XITS$seqtab.nochim),FUNS$substrRight,5)))
+```
+
+Sequences ending in AAAAA are not fungal ITS. They are probably bacterial, and may just be carryover from other sequencing projects. Only 651 counts (17 sequences) in total. The other endings are either some unrecognized primers (GAGGA and GGAGA, 5 sequences, 218 total counts), something unknown (AGGCT) or some variations of the amplicon (TTTAA, CCTAA,TTAAG). 
+Given that all exceptions are very small number of sequences, we will only proceed with the amplicons ending at CTTAA, TTTAA, CCTAA and TTAAG
+
+```{r filter substring right, echo=T,  eval=F, cache=T}
+unname(XITS$seqtab.nochim[,which(unlist(lapply(colnames(XITS$seqtab.nochim), FUNS$substrRight,5))=="AAAAA")])
+XITS$X <- XITS$seqtab.nochim[,unlist(lapply(colnames(XITS$seqtab.nochim), FUNS$substrRight,5) %in% c("CTTAA", "TTTAA", "CCTAA", "TTAAG"))]
+
+```
+
+
+
+### Removing mocks from data for further analysis:
+
+We remove the mock samples, and also we discard those ASV's that only belong to the mock samples: 
+
+```{r remove mock, echo=T,  eval=F, cache=T}
+XITS$X <- XITS$X[ ! rownames(XITS$X) %in% c("mockITS","mockITS1"),]
+XITS$X <- XITS$X[,colSums(XITS$X) > 0]
+
+# same for 16S
+
+X16S$X <- X16S$seqtab.nochim
+X16S$X <- X16S$X[ ! rownames(X16S$X) %in% c("mock16S","mock16S1"),]
+X16S$X <- X16S$X[,colSums(X16S$X) > 0]
+
+```
+
+
+
+## Step 9 : OTU clustering at 97.5% identity
+
+NOTE TO SELF: we could (should?) have done this with CD-HIT as well. It's probably less cumbersome. 
+
+
+
+We will now see if we can cluster variants based on k-mer distance. I do this in a two-step procedure for speed. First, we calculate the 5-mer distance between all sequences. I noticed that small differences, such as a SNP or the presence/absence of a primer was typically a 5-mer distance of > 0.001 but < 0.01. We cluster based on an initial k-mer distance of 5%. In a next step, we cluster within these clusters, based on real alignments, going to 97.5% sequence identity. This is our final cut-off for OTU clustering. 
+
+
+
+```{r generate OTUSs based on 5-mer distance, echo=T,  eval=F, cache=T}
+XITS$otus97.5 <- FUNS$otu_cluster(XITS$X)
+X16S$otus97.5 <- FUNS$otu_cluster(X16S$X)
+
+# Now we can generate count matrices for the otus rather than for ASVs
+
+XITS$X_otu97.5            <- as.data.frame(XITS$X)
+colnames(XITS$X_otu97.5)  <- as.character(XITS$otus97.5)
+XITS$X_otu97.5            <- as.matrix(as.data.frame(lapply(split.default(XITS$X_otu97.5, f = XITS$otus97.5), rowSums)))
+
+X16S$X_otu97.5            <- as.data.frame(X16S$X)
+colnames(X16S$X_otu97.5)  <- as.character(X16S$otus97.5)
+X16S$X_otu97.5            <- as.matrix(as.data.frame(lapply(split.default(X16S$X_otu97.5, f = X16S$otus97.5), rowSums)))
+
+```
+
+
+
+### Step 10: show that technical duplicates are similar, and merge them. Check and remove outlier samples. 
+
+We will base our decisions about merging and removing on alpha and beta diversity measures, because they take into account to what extent samples are similar to each other. First we generate sublists within XITS and X16S that will contain alpha diversity for the clustered OTU's. We will use these throughout the rest of the pipeline, but in this manner, we can add a very similar analysis for other OTU cutoffs if we wish to do so. 
+
+```{r generate alpha sublists 1, echo=T,  eval=F, cache=T,}
+XITS$alpha_otu97.5 <- list()
+X16S$alpha_otu97.5 <- list()
+
+XITS$alpha_asv <- list()
+X16S$alpha_asv <- list()
+```
+
+We will now look at most common alpha diversity measures, both for ITS and 16S, on the OTU level. The OTU's are clustered at 97.5% identity, which is very stringent. I only do this to prevent sequencing errors or super rare variants from slipping in, influencing our results. In order to make sure we are not introducing too much bias, I first do two quick checks: are some diversity measures correlated with sample size (sequencing depth)? And, are some diversity measures influenced a lot by using the OTU's rather than the ASV's? For this quick check I use the alpha function from the microbiome package, since it unites most common alpha diversity measures.  
+
+```{r alpha diversity check 1, echo=T,  eval=F, cache=T, fig.width=9, fig.height=17, message=FALSE, warning=FALSE}
+
+XITS$alpha_otu97.5$alpha <- cbind.data.frame(microbiome::alpha(t(XITS$X_otu97.5)),"total"=rowSums(XITS$X_otu97.5))
+X16S$alpha_otu97.5$alpha <- cbind.data.frame(microbiome::alpha(t(X16S$X_otu97.5)),"total"=rowSums(X16S$X_otu97.5))
+
+XITS$alpha_asv$alpha <- cbind.data.frame(microbiome::alpha(t(XITS$X)),"total"=rowSums(XITS$X))
+X16S$alpha_asv$alpha <- cbind.data.frame(microbiome::alpha(t(X16S$X)),"total"=rowSums(X16S$X))
+
+```
+
+
+#### Biases
+
+Next, I visualize potential biases with scatterplots. For the correlations between sequencing depth and alpha diversity measures, I use a red colour in case the correlation is significant (p<0.05).
+
+```{r alpha diversity check plots ITS 1, echo=T,  eval=T, cache=T, fig.width=9, fig.height=17, message=FALSE, warning=FALSE}
+
+# Relationship between OTU's and ASV's for ITS:
+par(mfrow=c(6,4))
+for (i in c(1:17,19:22))
+{
+  plot(XITS$alpha_otu97.5$alpha[,i],XITS$alpha_asv$alpha[,i],main=paste("ITS:",colnames(XITS$alpha_otu97.5$alpha)[i]),xlab="OTU",ylab="ASV")
+}
+
+# Correlation with sequencing depth for ITS:
+par(mfrow=c(6,4))
+for (i in c(1:17,19:22))
+{
+  p      <- cor.test(XITS$alpha_otu97.5$alpha[,i],XITS$alpha_otu97.5$alpha[,23])$p.value
+  r      <- cor(XITS$alpha_otu97.5$alpha[,i],XITS$alpha_otu97.5$alpha[,23])
+  corcol <- ifelse(p<0.05,yes = "darkred", no ="black") 
+  plot(XITS$alpha_otu97.5$alpha[,i],XITS$alpha_otu97.5$alpha[,23],main=paste("ITS:", colnames(XITS$alpha_otu97.5$alpha)[i]),xlab="alpha diversity estimate", ylab= "sequencing depth",col=corcol)
+}
+
+```
+
+```{r alpha diversity check plots 16S 1, echo=T,  eval=T, cache=T, fig.width=9, fig.height=17, message=FALSE, warning=FALSE}
+
+
+# Relationship between OTU's and ASV's for 16S:
+par(mfrow=c(6,4))
+for (i in c(1:17,19:22))
+{
+  plot(X16S$alpha_otu97.5$alpha[,i],X16S$alpha_asv$alpha[,i],main=paste("16S:", colnames(X16S$alpha_otu97.5$alpha)[i]),xlab="OTU",ylab="ASV")
+}
+
+# Correlation with sequencing depth for 16S:
+par(mfrow=c(6,4))
+for (i in c(1:17,19:22))
+{
+  p      <- cor.test(X16S$alpha_otu97.5$alpha[,i],X16S$alpha_otu97.5$alpha[,23])$p.value
+  r      <- cor(X16S$alpha_otu97.5$alpha[,i],X16S$alpha_otu97.5$alpha[,23])
+  corcol <- ifelse(p<0.05,yes = "darkred", no ="black") 
+  plot(X16S$alpha_otu97.5$alpha[,i],X16S$alpha_otu97.5$alpha[,23],main=paste("16S:", colnames(X16S$alpha_otu97.5$alpha)[i]),xlab="alpha diversity estimate", ylab= "sequencing depth",col=corcol)
+}
+
+```
+
+
+I conclude that for most indices, OTU vs ASV does not really matter. "dominance_core_abundance" cannot be calculated for ASV's. The highest correlations are obviously in richness/diversity, while dominance and especially rarity will be impacted a bit more. The correlation is weakest for evenness Camargo. 
+
+For what's concerned correlation between indices and sample size: there may be problem, because there are typically significant correlations, though never strong. Nasrin: you looked into saturation plots. They should be added here. 
+
+
+
+#### Outliers:
+
+I find little evidence for outliers at the level of ITS, but for 16S there are two samples that are clearly outliers: A5T and T3T
+This becomes clear with a quick pairs plot presenting a sample of alpha diversity measures, where A5T is colored red, and T3T orange. 
+A5T and T3T must be dominated by a couple of very abundant OTU's, while otherwise being composed of many rare taxa. 
+
+We will also find out that these samples have an extreme influence on ordination of beta diversity measures, and I think it would be best to exclude them altogether, also because they don't have particularly interesting values for 137Cs.
+
+
+```{r alpha outliers, echo=T,  eval=T, cache=T,fig.width=12,fig.height=12}
+cols <- rep("black",51)
+cols[8] <- "red"       # A5T
+cols[47] <- "orange"   # T3T
+pairs(X16S$alpha_otu97.5$alpha[c(1,4,5,6,8,9,11,14,22)],col=cols,pch=15)
+```
+
+
+
+#### How similar are technical duplicates?
+We will use some simple beta diversity based distance plots to show that technical replicates are very similar:
+
+```{r generate beta sublists, echo=T,  eval=F, cache=T,}
+XITS$beta_asv <- list()
+X16S$beta_asv <- list()
+
+XITS$beta_otu97.5 <- list()
+X16S$beta_otu97.5 <- list()
+
+```
+
+Bray Curtis distance based on the ASVs. Notice how the pairs of technical replicates are close to each other, but not necessarily always overlapping. Also notice how C5T and C6T, outliers on the level of readthroughs, seem to behave perfectly normal here. 
+
+
+```{r Bray Curtis ITS, echo=T,  eval=T, fig.width=8, fig.height=8}
+
+XITS$beta_asv$BCdist <- vegan::vegdist(XITS$X, method = "bray")
+FUNS$betaplot(XITS$beta_asv$BCdist,2,"ITS: NMDS based on Bray Curtis distance")
+
+mean(XITS$beta_asv$BCdist)
+median(XITS$beta_asv$BCdist)
+
+as.matrix(XITS$beta_asv$BCdist)["A2T","A2T1"]
+as.matrix(XITS$beta_asv$BCdist)["A3T","A3T1"]
+as.matrix(XITS$beta_asv$BCdist)["A4T","A4T1"]
+as.matrix(XITS$beta_asv$BCdist)["A6T","A6T1"]
+as.matrix(XITS$beta_asv$BCdist)["T10T","T10T1"]
+as.matrix(XITS$beta_asv$BCdist)["T12T","T12T1"]
+as.matrix(XITS$beta_asv$BCdist)["O9T","O9T1"]
+as.matrix(XITS$beta_asv$BCdist)["FU3T","FU3T1"]
+
+# see also:
+
+plot(XITS$mocks[1,],XITS$mocks[2,],log="xy")
+
+```
+
+
+For 16S, it looks less nice. I'm sure the culprit is the outliers A5T and T3T (see further). Try running it again without them. 
+
+```{r Bray Curtis 16S, echo=T,  eval=T, fig.width=8, fig.height=8}
+X16S$beta_asv$BCdist <- vegan::vegdist(X16S$X, method = "bray")
+FUNS$betaplot(X16S$beta_asv$BCdist,2,"16S: NMDS based on Bray Curtis distance")
+
+mean(X16S$beta_asv$BCdist)
+median(X16S$beta_asv$BCdist)
+
+as.matrix(X16S$beta_asv$BCdist)["A2T","A2T1"]
+as.matrix(X16S$beta_asv$BCdist)["A3T","A3T1"]
+as.matrix(X16S$beta_asv$BCdist)["A4T","A4T1"]
+as.matrix(X16S$beta_asv$BCdist)["A6T","A6T1"]
+as.matrix(X16S$beta_asv$BCdist)["T10T","T10T1"]
+as.matrix(X16S$beta_asv$BCdist)["T12T","T12T1"]
+as.matrix(X16S$beta_asv$BCdist)["O9T","O9T1"]
+as.matrix(X16S$beta_asv$BCdist)["FU3T","FU3T1"]
+
+# see also:
+
+plot(X16S$mocks[1,],X16S$mocks[2,],log="xy")
+
+```
+
+
+
+
+
+
+```{r merge duplicates and remove outliers , echo=T,  eval=T, fig.width=8, fig.height=8}
+
+# So let's now collapse/sum duplicates:
+XITS$X_bkp <- XITS$X
+XITS$X <- FUNS$collapse_duplicates(XITS$X)
+X16S$X_bkp <- X16S$X
+X16S$X <- FUNS$collapse_duplicates(X16S$X)
+
+# Remove outliers:
+X16S$X <- X16S$X[!c(rownames(X16S$X) %in% c("A5T","T3T")),]
+
+# Same for X_otu97.5
+XITS$X_otu97.5_bkp <- XITS$X_otu97.5
+XITS$X_otu97.5 <- FUNS$collapse_duplicates(XITS$X_otu97.5)
+X16S$X_otu97.5_bkp <- X16S$X_otu97.5
+X16S$X_otu97.5 <- FUNS$collapse_duplicates(X16S$X_otu97.5)
+X16S$X_otu97.5 <- X16S$X_otu97.5[!c(rownames(X16S$X_otu97.5) %in% c("A5T","T3T")),]
+```
+
+
+Now we can move on to the proper alpha and beta diversity analyses!
+
+
+
+
+
+
+
+
+## Step 10 : alpha diversity
+We start with richness, choosing the simple measure of the total number of taxa. 
+
+
+```{r generate alpha sublists 2, echo=T,  eval=F, cache=T,}
+XITS$alpha_otu97.5 <- list()
+X16S$alpha_otu97.5 <- list()
+
+XITS$alpha_asv <- list()
+X16S$alpha_asv <- list()
+```
+
+```{r alpha diversity check 2, echo=T,  eval=F, cache=T, fig.width=9, fig.height=17, message=FALSE, warning=FALSE}
+
+XITS$alpha_otu97.5$alpha <- cbind.data.frame(microbiome::alpha(t(XITS$X_otu97.5)),"total"=rowSums(XITS$X_otu97.5))
+X16S$alpha_otu97.5$alpha <- cbind.data.frame(microbiome::alpha(t(X16S$X_otu97.5)),"total"=rowSums(X16S$X_otu97.5))
+
+XITS$alpha_asv$alpha <- cbind.data.frame(microbiome::alpha(t(XITS$X)),"total"=rowSums(XITS$X))
+X16S$alpha_asv$alpha <- cbind.data.frame(microbiome::alpha(t(X16S$X)),"total"=rowSums(X16S$X))
+
+```
+
+
+Next, once again, we visualize potential biases with scatterplots. For the correlations between sequencing depth and alpha diversity measures, I use a red colour in case the correlation is significant (p<0.05).
+
+```{r alpha diversity check plots ITS 2, echo=T,  eval=T, cache=T, fig.width=9, fig.height=17, message=FALSE, warning=FALSE}
+
+# Relationship between OTU's and ASV's for ITS:
+par(mfrow=c(6,4))
+for (i in c(1:17,19:22))
+{
+  plot(XITS$alpha_otu97.5$alpha[,i],XITS$alpha_asv$alpha[,i],main=paste("ITS:",colnames(XITS$alpha_otu97.5$alpha)[i]),xlab="OTU",ylab="ASV")
+}
+
+# Correlation with sequencing depth for ITS:
+par(mfrow=c(6,4))
+for (i in c(1:17,19:22))
+{
+  p      <- cor.test(XITS$alpha_otu97.5$alpha[,i],XITS$alpha_otu97.5$alpha[,23])$p.value
+  r      <- cor(XITS$alpha_otu97.5$alpha[,i],XITS$alpha_otu97.5$alpha[,23])
+  corcol <- ifelse(p<0.05,yes = "darkred", no ="black") 
+  plot(XITS$alpha_otu97.5$alpha[,i],XITS$alpha_otu97.5$alpha[,23],main=paste("ITS:", colnames(XITS$alpha_otu97.5$alpha)[i]),xlab="alpha diversity estimate", ylab= "sequencing depth",col=corcol)
+}
+
+```
+
+```{r alpha diversity check plots 16S 2, echo=T,  eval=T, cache=T, fig.width=9, fig.height=17, message=FALSE, warning=FALSE}
+
+
+# Relationship between OTU's and ASV's for 16S:
+par(mfrow=c(6,4))
+for (i in c(1:17,19:22))
+{
+  plot(X16S$alpha_otu97.5$alpha[,i],X16S$alpha_asv$alpha[,i],main=paste("16S:", colnames(X16S$alpha_otu97.5$alpha)[i]),xlab="OTU",ylab="ASV")
+}
+
+# Correlation with sequencing depth for 16S:
+par(mfrow=c(6,4))
+for (i in c(1:17,19:22))
+{
+  p      <- cor.test(X16S$alpha_otu97.5$alpha[,i],X16S$alpha_otu97.5$alpha[,23])$p.value
+  r      <- cor(X16S$alpha_otu97.5$alpha[,i],X16S$alpha_otu97.5$alpha[,23])
+  corcol <- ifelse(p<0.05,yes = "darkred", no ="black") 
+  plot(X16S$alpha_otu97.5$alpha[,i],X16S$alpha_otu97.5$alpha[,23],main=paste("16S:", colnames(X16S$alpha_otu97.5$alpha)[i]),xlab="alpha diversity estimate", ylab= "sequencing depth",col=corcol)
+}
+
+```
+
+
+
+```{r alpha diversity richness, echo=T,  eval=F, cache=T,fig.width=9}
+
+# start with classical richness estimates:
+XITS$alpha_otu97.5$richness  <- microbiome::richness(t(XITS$X_otu97.5),index="observed")
+X16S$alpha_otu97.5$richness  <- microbiome::richness(t(X16S$X_otu97.5),index="observed")
+```
+
+```{r alpha diversity richness plots, echo=T,  eval=T, cache=T,fig.width=9}
+rich_all <- merge(XITS$alpha_otu97.5$richness,X16S$alpha_otu97.5$richness,by="row.names",suffixes=c("ITS","16S"))
+
+# No meaningfull correlation between richness of ITS or 16S samples
+pairs(rich_all[,-1])
+
+
+par(mfrow=c(2,3))
+plot(XITS$alpha_otu97.5$richness[,1] ~ log10(META[rownames(XITS$alpha_otu97.5$richness),"Cs_137"]),col=sitecolors[as.numeric(as.factor(META[rownames(XITS$alpha_otu97.5$richness),"site"]))],pch=16,cex=2,main=paste("ITS", colnames(XITS$alpha_otu97.5$richness)[1]),ylab=colnames(XITS$alpha_otu97.5$richness)[1],xlab="log10 137 Cs")
+plot(X16S$alpha_otu97.5$richness[,1] ~ log10(META[rownames(X16S$alpha_otu97.5$richness),"Cs_137"]),col=sitecolors[as.numeric(as.factor(META[rownames(X16S$alpha_otu97.5$richness),"site"]))],pch=16,cex=2,main=paste("16S", colnames(X16S$alpha_otu97.5$richness)[1]),ylab=colnames(X16S$alpha_otu97.5$richness)[1],xlab="log10 137 Cs")
+
+ rm(rich_all)
+```
+
+### Diversity
+
+
+We move on to the five diversity measures from the microbiome diversity function. Zero counts are included here, but excluding them did not change any of the conclusions (it did not make a big difference in the measures anyhow). Some things I noticed:
+
+* In absolute numbers, there is a way higher diversity at the 16S level than at the level of ITS. Moreover, the range of diversity estimates is way higher in ITS than in 16S, because the 16S samples are typically all squished in values very close to maximal diversity. 
+* There is a faint but significant correlation between diversity at the bacterial and fungal level for a couple of diversity measures. In other words: higher diversity in bacteria is correlated with higher diversity in fungi.  
+* Plotting the diversity indices per group, as a function of 137Cs levels, does not reveal any spectacular trends. 
+* There is one clear outlier for bacterial diversity: T3T , an otherwise unremarkable sample from Tsushima forest, has a very low diversity. We will later see this is caused by a dominance of one OTU. 
+
+
+
+```{r alpha diversity diversity, echo=T,  eval=F, cache=T,fig.width=9}
+# start with classical diversity estimates:
+XITS$alpha_otu97.5$diversity  <- microbiome::diversity(t(XITS$X_otu97.5))
+X16S$alpha_otu97.5$diversity          <- microbiome::diversity(t(X16S$X_otu97.5))
+
+
+```
+
+```{r alpha diversity diversity plots, echo=T,  eval=T, cache=T,fig.width=9}
+
+div_all         <- merge(XITS$alpha_otu97.5$diversity,X16S$alpha_otu97.5$diversity,by="row.names",suffixes=c("ITS","16S"))
+
+# First diversity plots for ITS:
+
+par(mfrow=c(2,3))
+for(i in 1:5)
+{
+plot(XITS$alpha_otu97.5$diversity[,i] ~ log10(META[rownames(XITS$alpha_otu97.5$diversity),"Cs_137"]),col=sitecolors[as.numeric(as.factor(META[rownames(XITS$alpha_otu97.5$diversity),"site"]))],pch=16,cex=2,main=paste("ITS", colnames(XITS$alpha_otu97.5$diversity)[i]),ylab=colnames(XITS$alpha_otu97.5$diversity)[i],xlab="log10 137 Cs")
+}
+
+# Same for bacteria
+par(mfrow=c(2,3))
+for(i in 1:5)
+{
+plot(X16S$alpha_otu97.5$diversity[,i] ~ log10(META[rownames(X16S$alpha_otu97.5$diversity),"Cs_137"]),col=sitecolors[as.numeric(as.factor(META[rownames(X16S$alpha_otu97.5$diversity),"site"]))],pch=16,cex=2,main=paste("16S", colnames(X16S$alpha_otu97.5$diversity)[i]),ylab=colnames(X16S$alpha_otu97.5$diversity)[i],xlab="log10 137 Cs")
+}
+
+
+pairs(div_all[,-1])
+# Inverse Simpson: p-value = 0.001955
+#cor.test(div_all[,2],div_all[,7])
+# Gini Simpson: p-value = 0.7551
+#cor.test(div_all[,3],div_all[,8])
+# Shannon: p-value = 0.02814
+#cor.test(div_all[,4],div_all[,9])
+# Fisher: p-value = 0.844
+#cor.test(div_all[,5],div_all[,10])
+# Coverage: p-value = 0.001783
+#cor.test(div_all[,6],div_all[,11])
+
+rm(div_all)
+```
+
+
+
+### Evenness 
+
+Similarly, very few trends. Only a super weak negative correlation at the level of Simpson evenness
+
+
+
+```{r alpha diversity evenness, echo=T,  eval=F, cache=T,fig.width=9}
+# start with classical evenness estimates:
+XITS$alpha_otu97.5$evenness  <- microbiome::evenness(t(XITS$X_otu97.5))
+X16S$alpha_otu97.5$evenness  <- microbiome::evenness(t(X16S$X_otu97.5))
+
+
+```
+
+```{r alpha diversity evenness plots, echo=T,  eval=T, cache=T,fig.width=9}
+# First evenness plots for ITS:
+
+eve_all <- merge(XITS$alpha_otu97.5$evenness,X16S$alpha_otu97.5$evenness,by="row.names",suffixes=c("ITS","16S"))
+
+
+par(mfrow=c(2,3))
+for(i in 1:5)
+{
+plot(XITS$alpha_otu97.5$evenness[,i] ~ log10(META[rownames(XITS$alpha_otu97.5$evenness),"Cs_137"]),col=sitecolors[as.numeric(as.factor(META[rownames(XITS$alpha_otu97.5$evenness),"site"]))],pch=16,cex=2,main=paste("ITS", colnames(XITS$alpha_otu97.5$evenness)[i]),ylab=colnames(XITS$alpha_otu97.5$evenness)[i],xlab="log10 137 Cs")
+}
+
+# Same for bacteria
+par(mfrow=c(2,3))
+for(i in 1:5)
+{
+plot(X16S$alpha_otu97.5$evenness[,i] ~ log10(META[rownames(X16S$alpha_otu97.5$evenness),"Cs_137"]),col=sitecolors[as.numeric(as.factor(META[rownames(X16S$alpha_otu97.5$evenness),"site"]))],pch=16,cex=2,main=paste("16S", colnames(X16S$alpha_otu97.5$evenness)[i]),ylab=colnames(X16S$alpha_otu97.5$evenness)[i],xlab="log10 137 Cs")
+}
+
+
+pairs(eve_all[,-1])
+#cor.test(eve_all[,2],eve_all[,7])
+#cor.test(eve_all[,3],eve_all[,8])
+cor.test(eve_all[,4],eve_all[,9]) # Simpson evenness
+#cor.test(eve_all[,5],eve_all[,10])
+#cor.test(eve_all[,6],eve_all[,11])
+
+rm(eve_all)
+```
+
+
+### Dominance
+
+* Notice how for 16S, T3T is completely dominated by one OTU.
+* There are no significant correlations between dominance measures between ITS and 16S
+
+```{r alpha diversity dominance, echo=T,  eval=F, cache=T,fig.width=9}
+
+# start with classical dominance estimates:
+XITS$alpha_otu97.5$dominance  <- microbiome::dominance(t(XITS$X_otu97.5))[,-1] # exclude dbp, which is essentially the same as "relative dominance"
+X16S$alpha_otu97.5$dominance  <- microbiome::dominance(t(X16S$X_otu97.5))[,-1]
+
+```
+
+```{r alpha diversity dominance plots, echo=T,  eval=T, cache=T,fig.width=9}
+
+dom_all <- merge(XITS$alpha_otu97.5$dominance,X16S$alpha_otu97.5$dominance,by="row.names",suffixes=c("ITS","16S"))
+
+# First dominance plots for ITS:
+
+par(mfrow=c(2,3))
+for(i in 1:6)
+{
+plot(XITS$alpha_otu97.5$dominance[,i] ~ log10(META[rownames(XITS$alpha_otu97.5$dominance),"Cs_137"]),col=sitecolors[as.numeric(as.factor(META[rownames(XITS$alpha_otu97.5$dominance),"site"]))],pch=16,cex=2,main=paste("ITS", colnames(XITS$alpha_otu97.5$dominance)[i]),ylab=colnames(XITS$alpha_otu97.5$dominance)[i],xlab="log10 137 Cs")
+}
+
+# Same for bacteria
+par(mfrow=c(2,3))
+for(i in 1:6)
+{
+plot(X16S$alpha_otu97.5$dominance[,i] ~ log10(META[rownames(X16S$alpha_otu97.5$dominance),"Cs_137"]),col=sitecolors[as.numeric(as.factor(META[rownames(X16S$alpha_otu97.5$dominance),"site"]))],pch=16,cex=2,main=paste("16S", colnames(X16S$alpha_otu97.5$dominance)[i]),ylab=colnames(X16S$alpha_otu97.5$dominance)[i],xlab="log10 137 Cs")
+}
+
+
+pairs(dom_all[,-1])
+
+#cor.test(dom_all[,2],dom_all[,8])
+#cor.test(dom_all[,3],dom_all[,9])
+#cor.test(dom_all[,4],dom_all[,10])
+#cor.test(dom_all[,5],dom_all[,11])
+#cor.test(dom_all[,6],dom_all[,12])
+#cor.test(dom_all[,7],dom_all[,13])
+
+rm(dom_all)
+```
+
+### Rarity
+
+And finally rarity. No interesting trends or correlations here either. 
+
+
+```{r alpha diversity rarity, echo=T,  eval=F, cache=T,fig.width=9}
+
+# start with classical rarity estimates:
+XITS$alpha_otu97.5$rarity  <- microbiome::rarity(t(XITS$X_otu97.5))
+X16S$alpha_otu97.5$rarity  <- microbiome::rarity(t(X16S$X_otu97.5))
+
+```
+
+```{r alpha diversity rarity plots, echo=T,  eval=T, cache=T,fig.width=9}
+
+
+rar_all <- merge(XITS$alpha_otu97.5$rarity,X16S$alpha_otu97.5$rarity,by="row.names",suffixes=c("ITS","16S"))
+
+par(mfrow=c(2,3))
+for(i in 1:3)
+{
+plot(XITS$alpha_otu97.5$rarity[,i] ~ log10(META[rownames(XITS$alpha_otu97.5$rarity),"Cs_137"]),col=sitecolors[as.numeric(as.factor(META[rownames(XITS$alpha_otu97.5$rarity),"site"]))],pch=16,cex=2,main=paste("ITS", colnames(XITS$alpha_otu97.5$rarity)[i]),ylab=colnames(XITS$alpha_otu97.5$rarity)[i],xlab="log10 137 Cs")
+}
+
+# Same for bacteria
+for(i in 1:3)
+{
+plot(X16S$alpha_otu97.5$rarity[,i] ~ log10(META[rownames(X16S$alpha_otu97.5$rarity),"Cs_137"]),col=sitecolors[as.numeric(as.factor(META[rownames(X16S$alpha_otu97.5$rarity),"site"]))],pch=16,cex=2,main=paste("16S", colnames(X16S$alpha_otu97.5$rarity)[i]),ylab=colnames(X16S$alpha_otu97.5$rarity)[i],xlab="log10 137 Cs")
+}
+
+
+pairs(rar_all[,-1])
+
+#cor.test(rar_all[,2],rar_all[,5])
+#cor.test(rar_all[,3],rar_all[,6])
+#cor.test(rar_all[,4],rar_all[,7])
+
+rm(rar_all)
+```
+
+
+
+
+
+## Step 11 : beta diversity
+
+We will look into some classical beta diversity measures based on OTU's, and next we will move on to unifrac-based distance methods, working with the ASV's. 
+
+Visualisation of beta diversity will be with NMDS. Nasrin: first I visualized using MDS (PCoA), but going through literature I find more examples where they use nonmetric. 
+Can you please double check which one is preferred and why?
+
+
+
+
+
+
+### Bray Curtis based on OTUS
+First a Bray Curtis distance based on the OTUS. Notice that the plots are NMDS. They separate between sites extremely well for ITS. This needs more reflection because it's super simple and by far the nicest beta diversity plot. We could also consider doing the same with a 95% identity cutoff for OTU's, which should be entirely feasible with the functions defined above. 
+
+
+```{r Bray Curtis ITS, echo=T,  eval=T, fig.width=8, fig.height=8}
+
+XITS$beta_otu97.5$BCdist <- vegan::vegdist(XITS$X_otu97.5, method = "bray")
+FUNS$betaplot(XITS$beta_otu97.5$BCdist,2,"ITS: NMDS based on Bray Curtis distance")
+
+```
+
+For 16S, it looks less nice. I'm sure the culprit is the outliers A5T and T3T (see further). Try running it again without them. 
+
+```{r Bray Curtis 16S, echo=T,  eval=T, fig.width=8, fig.height=8}
+X16S$beta_otu97.5$BCdist <- vegan::vegdist(X16S$X_otu97.5, method = "bray")
+FUNS$betaplot(X16S$beta_otu97.5$BCdist,2,"16S: NMDS based on Bray Curtis distance")
+
+```
+
+
+
+### UniFrac based on ASV's
+
+Next, we generate distance matrices and neighbour joining trees for UniFrac. I have put the entire thing in one function, with two inputs: the dataset (XITS or X16S), and the k value. It calculates 3 kinds of distance matrix based on k-mer distance (euclidean, cosine distance and edgar). Next, it generates neighbour joining trees. With these trees and the untransformed count matrix, it calculates weighted and unweighted unifrac. 
+
+
+```{r distance matrices and nj trees, echo = T, eval = F}
+
+
+XITS <- FUNS$generate_beta_asv(XITS, 5)
+XITS <- FUNS$generate_beta_asv(XITS, 7)
+
+X16S <- FUNS$generate_beta_asv(X16S, 5)
+X16S <- FUNS$generate_beta_asv(X16S, 7)
+
+
+
+
+```
+
+
+
+### Unifrac plots ITS
+
+```{r unifrac NMDS plots ITS, echo = T, eval = T, cache=T,fig.width=8, fig.height=8}
+
+FUNS$betaplot(XITS$beta_asv$k5$cos$WUF,2,"ITS: NMDS based on weighted unifrac")
+FUNS$betaplot(XITS$beta_asv$k5$cos$UUF,2,"ITS: NMDS based on unweighted unifrac")
+
+```
+
+### Unifrac plots 16S
+
+```{r unifrac NMDS plots 16S, echo = T, eval = T, cache=T,fig.width=8, fig.height=8}
+
+FUNS$betaplot(X16S$beta_asv$k5$cos$WUF,2,"16S: NMDS based on weighted unifrac")
+FUNS$betaplot(X16S$beta_asv$k5$cos$UUF,2,"16S: NMDS based on unweighted unifrac")
+```
+
+
+It becomes immediately clear that the 16S unifrac looks very messy. This is all due to the outliers (see earlier) and I'm pretty sure we should repeat the calculations without these datapoints. I was first thinking just removing the two datapoints from the unifrac outcomes, but NJ trees are used to infer evolutionary relationships based on distance data. Outliers can disproportionately influence the tree structure by creating long branches that can attract or repel other branches (long branch attraction). So the outliers would not only affect their own placement in the tree but also alter the topology of the tree regarding other samples. I guess this could distort the inferred relationships among the more typical samples.
+
+I will recalculate the whole thing ditching the two outliers. 
+
+
+Note that these plots are just a selection for illustration for now. You can generate many more plots and they should be explored: 
+* NMDS with more than 2 dimensions (but keep on checking the stress)
+* You can consider going back to PCoA (see earlier remarks)
+* Unifrac is based on trees, which are constructed in different manners (different k values and different distance metrics). You can go through them. 
+
+
+
+## Step 12: Taxonomy
+And finally the taxonomy part. Nothing much to say here for now, because it still needs closer inspection, but everything we need should be there. First, we assign taxonomy both for ITS and 16S: 
+
+```{r Taxonomy, echo = T, eval = F}
+
+
+### Assign taxonomy: 
+
+XITS$taxa <- assignTaxonomy(colnames(XITS$X), "sh_general_release_dynamic_s_all_04.04.2024.fasta",verbose=T,multithread=20)
+X16S$taxa <- assignTaxonomy(colnames(X16S$X), "silva_nr99_v138.1_wSpecies_train_set.fa.gz",verbose=T,multithread=20)
+
+```
+
+Next, we define a function to barplot taxonomic data for all, or for a subset of samples:
+
+
+```{r Taxonomy barplot function, echo = T, eval = F}
+
+
+```
+
+
+And some barplots on the class level as an illustration:
+
+```{r Taxonomy barplots, echo = T, eval = T, warnings=F, message=F, fig.width=12, fig.height=10}
+
+FUNS$barplot_function(XITS$X,XITS$taxa,"Class",samples=c(1:44),other=12)
+
+FUNS$barplot_function(X16S$X,X16S$taxa,"Class",samples=c(1:51),other=12)
+
+
+```
+
+
+
+
+
+```{r EXIT, echo=T,  eval=T, cache=F}
+knitr::knit_exit()
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+NOTA voor NMDS: goodness of fit met Shepard diagram. Of ies scree plot achtig. 
+Stress > 0.2 poor fit
+Stress < 0.1 God fit
+
+XITS <- generate_beta_asv(XITS, 5)
+
+
+
+
+
+
+
+
+
+XITS$beta_asv$k5$kcounts       <- kcount(sapply(colnames(XITS$X),strsplit,split=""),k=5, residues="DNA")
+XITS$beta_asv$k5$euc$dist      <- dist(XITS$beta_asv$k5$kcounts, method="euclidean")
+XITS$beta_asv$k5$edg$dist      <- kdistance(sapply(colnames(XITS$X),strsplit,split=""),k=5)
+XITS$beta_asv$k5$cos$dist      <- cosine_dissim(XITS$beta_asv$k5$kcounts)
+
+XITS$beta_asv$k5$euc$nj        <- ape::nj(XITS$beta_asv$k5$euc$dist)
+XITS$beta_asv$k5$edg$nj        <- ape::nj(XITS$beta_asv$k5$edg$dist)
+XITS$beta_asv$k5$cos$nj        <- ape::nj(XITS$beta_asv$k5$cos$dist)
+
+XITS$beta_asv$k5$euc$phyloseq  <- phyloseq(otu_table(XITS$X,taxa_are_rows=F),phy_tree(XITS$beta_asv$k5$euc$nj))
+XITS$beta_asv$k5$edg$phyloseq  <- phyloseq(otu_table(XITS$X,taxa_are_rows=F),phy_tree(XITS$beta_asv$k5$edg$nj))
+XITS$beta_asv$k5$cos$phyloseq  <- phyloseq(otu_table(XITS$X,taxa_are_rows=F),phy_tree(XITS$beta_asv$k5$cos$nj))
+
+XITS$beta_asv$k5$euc$WUF  <- UniFrac(XITS$beta_asv$k5$euc$phyloseq, weighted=T, normalized=T)
+XITS$beta_asv$k5$edg$WUF  <- UniFrac(XITS$beta_asv$k5$edg$phyloseq, weighted=T, normalized=T)
+XITS$beta_asv$k5$cos$WUF  <- UniFrac(XITS$beta_asv$k5$cos$phyloseq, weighted=T, normalized=T)
+
+XITS$beta_asv$k5$euc$UUF  <- UniFrac(XITS$beta_asv$k5$euc$phyloseq, weighted=F, normalized=T)
+XITS$beta_asv$k5$edg$UUF  <- UniFrac(XITS$beta_asv$k5$edg$phyloseq, weighted=F, normalized=T)
+XITS$beta_asv$k5$cos$UUF  <- UniFrac(XITS$beta_asv$k5$cos$phyloseq, weighted=F, normalized=T)
+
+
+
+
+
+
+
+
+
+
+
+
+
+XITS$beta_asv$k7$counts   <- kcount(sapply(colnames(XITS$X),strsplit,split=""),k=7, residues="DNA")
+XITS$beta_asv$k7$dist_euc <- dist(XITS$beta_asv$k7$counts, method="euclidean")
+XITS$beta_asv$k7$dist_edg <- kdistance(sapply(colnames(XITS$X),strsplit,split=""),k=7)
+XITS$beta_asv$k7$dist_cos <- cosine_dissim(XITS$beta_asv$k7$counts)
+
+X16S$beta_asv$k5$counts   <- kcount(sapply(colnames(X16S$X),strsplit,split=""),k=5, residues="DNA")
+X16S$beta_asv$k5$dist_euc <- dist(X16S$beta_asv$k5$counts, method="euclidean")
+X16S$beta_asv$k5$dist_edg <- kdistance(sapply(colnames(X16S$X),strsplit,split=""),k=5)
+X16S$beta_asv$k5$dist_cos <- cosine_dissim(X16S$beta_asv$k5$counts)
+
+X16S$beta_asv$k7$counts   <- kcount(sapply(colnames(X16S$X),strsplit,split=""),k=7, residues="DNA")
+X16S$beta_asv$k7$dist_euc <- dist(X16S$beta_asv$k7$counts, method="euclidean")
+X16S$beta_asv$k7$dist_edg <- kdistance(sapply(colnames(X16S$X),strsplit,split=""),k=7)
+X16S$beta_asv$k7$dist_cos <- cosine_dissim(X16S$beta_asv$k7$counts)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Next, I reduce dimensionality as follows:
+
+* Take a sequence with all its distances from other sequences.
+* Generate a list of all sequences that are <0.01 away from this sequence
+* Take the subset of the seqtab.nochim dataframe that contains this sequence
+* Collapse the counts of sequences into the major variant when the minor variant only occurs in a maximum 3 samples, and in which it has less than 5% of counts of the major variant
+
+```{r reduce dimensionality, eval=F, cache=T}
+
+X <- XITS$X
+
+for (i in 1:nrow(as.matrix(dist5_ITS)))
+{
+  if(sum(X[,i])>0)  
+  {
+    indices <- unname(which(as.matrix(dist5_ITS)[i,]<0.01))
+    if(length(indices)>1)
+    {  
+      print(i)
+      print(indices)
+      # Determine the major variant (the one with the most occurences)
+      major <- indices[which.max(colSums(XITS$X[,indices]))]
+      minor <- indices[indices != major]
+    
+      for (k in minor)
+      {
+        # which samples does it occur in?
+        ksamples <- which(X[,k]>0)
+        if(length(ksamples)<=3)
+        {
+          if(max(X[ksamples,k]/X[ksamples,major])<0.05) 
+          {
+            X[,major] <- X[,major] + X[,k]
+            X[,k]     <- 0
+            cat("M")
+          }
+        }
+      }  
+    }
+  }  
+}
+XITS$XX <- X 
+
+
+X <- X16S$X
+
+for (i in 1:nrow(as.matrix(dist5_16S)))
+{
+  if(sum(X[,i])>0)  
+  {
+    indices <- unname(which(as.matrix(dist5_16S)[i,]<0.01))
+    if(length(indices)>1)
+    {  
+      print(i)
+      print(indices)
+      # Determine the major variant (the one with the most occurences)
+      major <- indices[which.max(colSums(X16S$X[,indices]))]
+      minor <- indices[indices != major]
+    
+      for (k in minor)
+      {
+        # which samples does it occur in?
+        ksamples <- which(X[,k]>0)
+        if(length(ksamples)<=3)
+        {
+          if(max(X[ksamples,k]/X[ksamples,major])<0.05) 
+          {
+            X[,major] <- X[,major] + X[,k]
+            X[,k]     <- 0
+            cat("M")
+          }
+        }
+      }  
+    }
+  }  
+}
+
+
+X16S$XX <- X16S$X
+```
+
+
+
+
+## Step 9 : alpha diversity:
+
+
+
+NJ   <- hclust(kdist5_cos,method="complete")
+OTUS <- cutree(NJ,h=0.20)
+
+OTU <- X
+for (i in unique(OTUS)){
+  indices <- which(OTUS==i)
+  if(length(indices)>1){
+  OTU[,indices[1]]  <- rowSums(OTU[,indices])
+  OTU[,indices[-1]] <- 0
+  }
+  }
+OTU <- OTU[,colSums(OTU) != 0]
+plot(AA[,i] ~ log(META$X137Cs),col=sitecolors[as.numeric(as.factor(META$geographical.loc))],pch=16,cex=3,main=colnames(AA)[i]);i=i+1
+
+AA <- microbiome::alpha(t(OTU))
+
+
+
+
+
+
+
+
+multidimensional scaling, and distances between sequences. 
+In this workflow, I will not use OTU's, and stick with ASV's. So here comes the first challenge. Imagine two samples share a couple of sequences, but are also different for many. Each of them may even have a majority of unique sequences. This means that in our estimates of the distance between these samples (distance as in "how similar is their microbial composition") we have to take into account the fact that some pairs of sequences are only remotely related while others are just one nucleotide substitution apart. One method to do this is unifrac. However, I have been trying some things, but either I'm doing it all wrong, or it's just completely impossible with over 4K sequences. Making alignments and constructing a NJ tree has just not worked (perhaps specialists may come up with a workaround, but I didn't manage). Therefore I have worked out my own method using k-mer based distances. Just very briefly: 
+
+* Each DNA sequence can be described as a sequence of k-mers of a certain size k. This is nothing more than the sequence of strings of length k that is obtained by reading through a sliding window of size k. For example the 4-mers in the word fukushima are fuku, ukus, kush, ushi, shim, hima. 
+* Now we can start clustering sequences based on their shared k-mers. For example, the distance between the words fukushima and sushi is smaller (sharing the 4-mer "ushi") than between fukushima and hasselt (sharing no 4-mers). The longer the k-mer length, the more specific our distance metric, but also the more computationally difficult it is (there are way fewer 5-mers in a 4-letter alphabet than there are 9-mers). I am using k-mer distance here as a proxy for evolutionary distance (has been done before) with methods that have been computationally optimized already for other use cases.
+* In a next step, I can use the k-mer distance matrix of the sequences to "correct" the distances between the samples based on the number (fraction) of a certain taxon to be present. I do this by using the inner product (dot product) of the k-mer based distance matrix, and the counts-based distance matrix. What's essentially happening here, is that if samples have similar counts for sequences that are very much alike, they count in the MDS almost as if they were the same sequence. There is still some polishing to be done here, but I can show you later how the dot product method I use here is totally equivalent to using distances between samples just based on k-mer counts. 
+
+For now we have not yet corrected our samples for numbers of sequences after filtering. As we discussed earlier, this is something we have to look into, but it will not critically alter our findings as long as our samples are more or less of equal size, which is totally the case. Here we just turn our data into compositional vectors. See also [this paper](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC5695134/) for more info on why we have to make sure we treat our data as compositional. 
+
+First, we remove the mock communities. We also remove sequences that occur only in one library with very low (<3) counts. 
+
+
+# X <- seqtab.nochim[which(!rownames(seqtab.nochim) %in% c("MT1","MT2")),]
+# sum(unname(apply(X,2,sum))<4)
+
+
+```{r make compositional, echo=T,  eval=F}
+#seqtab_norm <- seqtab.nochim/rowSums(seqtab.nochim)
+
+XITS$Xnorm  <- XITS$XX/rowSums(XITS$XX)
+X16S$Xnorm  <- X16S$XX/rowSums(X16S$XX)
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+We start with some methods that are not informed about sequence similarity. With the compositional nature of our data, we need to transform them, combined with relevant distance methods.  
+
+Bray_curtis distance: 
+This is actually better suited for OTU's
+
+
+
+
+
+
+
+
+
+
+Aitchison distance:
+CLR transformation with one pseudocount. Notice that here, the absolute values of the number of reads will be of influence. So if we would like to use this distance measure in a later phase, it's best to subsample.   
+```{r Aitchison, echo=T,  eval=T, fig.width=8, fig.height=8}
+
+tse <- clr(seqtab.nochim + 0.1) 
+pcoa_results<-cmdscale(dist(tse),k=2)
+lim <- max(abs(range(pcoa_results)))*1.1
+plot(pcoa_results[,1], pcoa_results[,2], xlab = "Coordinate 1", ylab = "Coordinate 2", main = "Aitchison distance",col="white",xlim=c(-lim,lim),ylim=c(-lim,lim))
+text(pcoa_results[,1], pcoa_results[,2], labels=rownames(pcoa_results), cex=0.75)
+```
+
+
+Next, execute the k-mer based distance estimates between the sequences:
+Don't execute these calculations on any computer under < 20 Gb RAM. It will freeze. 
+
+```{r kdistance, echo=T,  eval=F }
+dist3  <- kdistance(sapply(colnames(seqtab.nochim),strsplit,split=""),k=3)
+dist5  <- kdistance(sapply(colnames(seqtab.nochim),strsplit,split=""),k=5)
+dist7  <- kdistance(sapply(colnames(seqtab.nochim),strsplit,split=""),k=7)
+#dist9  <- kdistance(sapply(colnames(seqtab.nochim),strsplit,split=""),k=9) # uses about 20 Gb of RAM for multiple hours
+```
+
+
+Next the distances that are corrected for sequence similarity: 
+
+```{r dotprods, echo=T,  eval=F }
+
+dotprod5 <- seqtab_norm %*% as.matrix(dist5)
+dotprod7 <- seqtab_norm %*% as.matrix(dist7)
+dotprod9 <- seqtab_norm %*% as.matrix(dist9)
+```
+
+And finally, the principal coordinate analyses on the inner products:
+
+```{r dotprod pcoa, echo=T,  eval=T, fig.width=8, fig.height=8}
+
+pcoa_results<-cmdscale(dist(dotprod5),k=2)
+lim <- max(abs(range(pcoa_results)))*1.1
+plot(pcoa_results[,1], pcoa_results[,2], xlab = "Coordinate 1", ylab = "Coordinate 2", main = "PCoA dotprod 5, euclidean",col="white",xlim=c(-lim,lim),ylim=c(-lim,lim))
+text(pcoa_results[,1], pcoa_results[,2], labels=rownames(pcoa_results), cex=0.75)
+
+pcoa_results<-cmdscale(dist(dotprod7),k=2)
+lim <- max(abs(range(pcoa_results)))*1.1
+plot(pcoa_results[,1], pcoa_results[,2], xlab = "Coordinate 1", ylab = "Coordinate 2", main = "PCoA dotprod 7, euclidean",col="white",xlim=c(-lim,lim),ylim=c(-lim,lim))
+text(pcoa_results[,1], pcoa_results[,2], labels=rownames(pcoa_results), cex=0.75)
+
+pcoa_results<-cmdscale(dist(dotprod9),k=2)
+lim <- max(abs(range(pcoa_results)))*1.1
+plot(pcoa_results[,1], pcoa_results[,2], xlab = "Coordinate 1", ylab = "Coordinate 2", main = "PCoA dotprod 9, euclidean",col="white",xlim=c(-lim,lim),ylim=c(-lim,lim))
+text(pcoa_results[,1], pcoa_results[,2], labels=rownames(pcoa_results), cex=0.75)
+```
+
+
+R1.flagsITS
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+## Interpretation and next steps
+The uncorrected samples actually seem to cluster pretty well per site, which is good news. One important observation is that our control samples (mock communities) don't seem to stand out. This is something that we should definitely check in more detail, because I actually expected them to be drastically different. 
+In the k-mer distance corrected MDS plots, the clustering per site is way less clear, but the control samples cluster somewhat better outside the range of the other samples. It may be the case that clustering becomes clearer here once the MT samples are removed, because they may dominate coordinate 1.  
+
+We are clearly not there yet. In theory we should take into account relationships between sequences, but in practice it turns out it decreases clustering of our samples per site.  
+
+What's next? Some suggestions:
+
+* Decide whether we want to keep the samples with very low readthrough (C5T, C6T) and poorer base call quality (C5T, U3T). Taking them out and applying more stringent filtering will yield fewer ASV's, but in theory with the k-mer based method this should not matter that much. 
+* The method I used now, is equivalent to weighted unifrac. We should also check whether the equivalent of standard unifrac, or balanced unifrac aren't better.
+* Check controls MT1 and MT2, and if they are OK, take them out of the multivariate analyses
+* Assign taxonomy to some of the sequences to check whether they are real, entire basidiomycete amplicons. I checked a sample, and they mostly were. But we should definitely look into the size selection of our amplicons, because the inserts are really on the small side. 
+
+
+
+
+
+
+
+
