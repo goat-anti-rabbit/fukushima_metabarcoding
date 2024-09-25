@@ -7,7 +7,7 @@ output:
     #html_document:
     toc: yes
     number_sections: yes
-    mode: selfcontained
+    #mode: selfcontained
     code_folding: show
 
 date: "`r Sys.Date()`"
@@ -15,7 +15,7 @@ date: "`r Sys.Date()`"
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(echo = TRUE, verbose=T)
 ```
 
 ## Step 1 : preliminaries
@@ -54,6 +54,7 @@ library("doParallel")
 # load("~/fukushima/metabarcoding/both_6may.RDat")
 # load("~/fukushima/metabarcoding/both_7may.RDat")
 # load("analysis_metagenomics_fukushima_20240507.RData")
+load("/home/rik/fukushima/metabarcoding.git/25sept.RDat")
 ```
 
 First I generate two objects that will harbour all intermediate steps and auxiliary variables for each dataset.
@@ -208,6 +209,8 @@ plot(XITS$proportion_revcomp_fw,XITS$proportion_revcomp_rv,log="xy",col="white",
 text(XITS$proportion_revcomp_fw,XITS$proportion_revcomp_rv,labels=sample.names,cex=0.75)
 
 ```
+
+
 ```{r plot readthrough 16S, echo=T,  eval=T, fig.width=10, fig.height=6}
 
 plot(X16S$proportion_revcomp_fw + 1e-06 ,X16S$proportion_revcomp_rv + 1e-06 , log="xy",col="white",cex=0.75, main = "16S: proportion of reads with readthrough of the entire primer")
@@ -759,7 +762,7 @@ X16S$X_otu97.5            <- as.matrix(as.data.frame(lapply(split.default(X16S$X
 
 We will base our decisions about merging and removing on alpha and beta diversity measures, because they take into account to what extent samples are similar to each other. First we generate sublists within XITS and X16S that will contain alpha diversity for the clustered OTU's. We will use these throughout the rest of the pipeline, but in this manner, we can add a very similar analysis for other OTU cutoffs if we wish to do so. 
 
-```{r generate alpha sublists 1, echo=T,  eval=F, cache=T,}
+```{r generate alpha sublists 1, echo=T,  eval=F}
 XITS$alpha_otu97.5 <- list()
 X16S$alpha_otu97.5 <- list()
 
@@ -769,7 +772,7 @@ X16S$alpha_asv <- list()
 
 We will now look at most common alpha diversity measures, both for ITS and 16S, on the OTU level. The OTU's are clustered at 97.5% identity, which is very stringent. I only do this to prevent sequencing errors or super rare variants from slipping in, influencing our results. In order to make sure we are not introducing too much bias, I first do two quick checks: are some diversity measures correlated with sample size (sequencing depth)? And, are some diversity measures influenced a lot by using the OTU's rather than the ASV's? For this quick check I use the alpha function from the microbiome package, since it unites most common alpha diversity measures.  
 
-```{r alpha diversity check 1, echo=T,  eval=F, cache=T, fig.width=9, fig.height=17, message=FALSE, warning=FALSE}
+```{r alpha diversity check 1, echo=T,  eval=F}
 
 XITS$alpha_otu97.5$alpha <- cbind.data.frame(microbiome::alpha(t(XITS$X_otu97.5)),"total"=rowSums(XITS$X_otu97.5))
 X16S$alpha_otu97.5$alpha <- cbind.data.frame(microbiome::alpha(t(X16S$X_otu97.5)),"total"=rowSums(X16S$X_otu97.5))
@@ -867,7 +870,7 @@ X16S$beta_otu97.5 <- list()
 Bray Curtis distance based on the ASVs. Notice how the pairs of technical replicates are close to each other, but not necessarily always overlapping. Also notice how C5T and C6T, outliers on the level of readthroughs, seem to behave perfectly normal here. 
 
 
-```{r Bray Curtis ITS, echo=T,  eval=T, fig.width=8, fig.height=8}
+```{r Bray Curtis ITS 1, echo=T,  eval=T, fig.width=8, fig.height=8}
 
 XITS$beta_asv$BCdist <- vegan::vegdist(XITS$X, method = "bray")
 FUNS$betaplot(XITS$beta_asv$BCdist,2,"ITS: NMDS based on Bray Curtis distance")
@@ -893,7 +896,7 @@ plot(XITS$mocks[1,],XITS$mocks[2,],log="xy")
 
 For 16S, it looks less nice. I'm sure the culprit is the outliers A5T and T3T (see further). Try running it again without them. 
 
-```{r Bray Curtis 16S, echo=T,  eval=T, fig.width=8, fig.height=8}
+```{r Bray Curtis 16S 1, echo=T,  eval=T, fig.width=8, fig.height=8}
 X16S$beta_asv$BCdist <- vegan::vegdist(X16S$X, method = "bray")
 FUNS$betaplot(X16S$beta_asv$BCdist,2,"16S: NMDS based on Bray Curtis distance")
 
@@ -923,20 +926,16 @@ plot(X16S$mocks[1,],X16S$mocks[2,],log="xy")
 ```{r merge duplicates and remove outliers , echo=T,  eval=T, fig.width=8, fig.height=8}
 
 # So let's now collapse/sum duplicates:
-XITS$X_bkp <- XITS$X
-XITS$X <- FUNS$collapse_duplicates(XITS$X)
-X16S$X_bkp <- X16S$X
-X16S$X <- FUNS$collapse_duplicates(X16S$X)
+XITS$x      <- FUNS$collapse_duplicates(XITS$X)
+X16S$x      <- FUNS$collapse_duplicates(X16S$X)
 
 # Remove outliers:
-X16S$X <- X16S$X[!c(rownames(X16S$X) %in% c("A5T","T3T")),]
+X16S$x      <- X16S$x[!c(rownames(X16S$x) %in% c("A5T","T3T")),]
 
 # Same for X_otu97.5
-XITS$X_otu97.5_bkp <- XITS$X_otu97.5
-XITS$X_otu97.5 <- FUNS$collapse_duplicates(XITS$X_otu97.5)
-X16S$X_otu97.5_bkp <- X16S$X_otu97.5
-X16S$X_otu97.5 <- FUNS$collapse_duplicates(X16S$X_otu97.5)
-X16S$X_otu97.5 <- X16S$X_otu97.5[!c(rownames(X16S$X_otu97.5) %in% c("A5T","T3T")),]
+XITS$x_otu97.5     <- FUNS$collapse_duplicates(XITS$X_otu97.5)
+X16S$x_otu97.5     <- FUNS$collapse_duplicates(X16S$X_otu97.5)
+X16S$x_otu97.5     <- X16S$x_otu97.5[!c(rownames(X16S$x_otu97.5) %in% c("A5T","T3T")),]
 ```
 
 
@@ -963,11 +962,11 @@ X16S$alpha_asv <- list()
 
 ```{r alpha diversity check 2, echo=T,  eval=F, cache=T, fig.width=9, fig.height=17, message=FALSE, warning=FALSE}
 
-XITS$alpha_otu97.5$alpha <- cbind.data.frame(microbiome::alpha(t(XITS$X_otu97.5)),"total"=rowSums(XITS$X_otu97.5))
-X16S$alpha_otu97.5$alpha <- cbind.data.frame(microbiome::alpha(t(X16S$X_otu97.5)),"total"=rowSums(X16S$X_otu97.5))
+XITS$alpha_otu97.5$alpha <- cbind.data.frame(microbiome::alpha(t(XITS$x_otu97.5)),"total"=rowSums(XITS$x_otu97.5))
+X16S$alpha_otu97.5$alpha <- cbind.data.frame(microbiome::alpha(t(X16S$x_otu97.5)),"total"=rowSums(X16S$x_otu97.5))
 
-XITS$alpha_asv$alpha <- cbind.data.frame(microbiome::alpha(t(XITS$X)),"total"=rowSums(XITS$X))
-X16S$alpha_asv$alpha <- cbind.data.frame(microbiome::alpha(t(X16S$X)),"total"=rowSums(X16S$X))
+XITS$alpha_asv$alpha <- cbind.data.frame(microbiome::alpha(t(XITS$x)),"total"=rowSums(XITS$x))
+X16S$alpha_asv$alpha <- cbind.data.frame(microbiome::alpha(t(X16S$x)),"total"=rowSums(X16S$x))
 
 ```
 
@@ -1019,14 +1018,14 @@ for (i in c(1:17,19:22))
 
 
 
-```{r alpha diversity richness, echo=T,  eval=F, cache=T,fig.width=9}
+```{r alpha diversity richness, echo=T,  eval=T, cache=F,fig.width=9}
 
 # start with classical richness estimates:
-XITS$alpha_otu97.5$richness  <- microbiome::richness(t(XITS$X_otu97.5),index="observed")
-X16S$alpha_otu97.5$richness  <- microbiome::richness(t(X16S$X_otu97.5),index="observed")
+XITS$alpha_otu97.5$richness  <- microbiome::richness(t(XITS$x_otu97.5),index="observed")
+X16S$alpha_otu97.5$richness  <- microbiome::richness(t(X16S$x_otu97.5),index="observed")
 ```
 
-```{r alpha diversity richness plots, echo=T,  eval=T, cache=T,fig.width=9}
+```{r alpha diversity richness plots, echo=T,  eval=T, cache=F,fig.width=9}
 rich_all <- merge(XITS$alpha_otu97.5$richness,X16S$alpha_otu97.5$richness,by="row.names",suffixes=c("ITS","16S"))
 
 # No meaningfull correlation between richness of ITS or 16S samples
@@ -1052,15 +1051,15 @@ We move on to the five diversity measures from the microbiome diversity function
 
 
 
-```{r alpha diversity diversity, echo=T,  eval=F, cache=T,fig.width=9}
+```{r alpha diversity diversity, echo=T,  eval=T, cache=F,fig.width=9}
 # start with classical diversity estimates:
-XITS$alpha_otu97.5$diversity  <- microbiome::diversity(t(XITS$X_otu97.5))
-X16S$alpha_otu97.5$diversity          <- microbiome::diversity(t(X16S$X_otu97.5))
+XITS$alpha_otu97.5$diversity  <- microbiome::diversity(t(XITS$x_otu97.5))
+X16S$alpha_otu97.5$diversity  <- microbiome::diversity(t(X16S$x_otu97.5))
 
 
 ```
 
-```{r alpha diversity diversity plots, echo=T,  eval=T, cache=T,fig.width=9}
+```{r alpha diversity diversity plots, echo=T,  eval=T, cache=F,fig.width=9}
 
 div_all         <- merge(XITS$alpha_otu97.5$diversity,X16S$alpha_otu97.5$diversity,by="row.names",suffixes=c("ITS","16S"))
 
@@ -1103,15 +1102,15 @@ Similarly, very few trends. Only a super weak negative correlation at the level 
 
 
 
-```{r alpha diversity evenness, echo=T,  eval=F, cache=T,fig.width=9}
+```{r alpha diversity evenness, echo=T,  eval=T, cache=F,fig.width=9}
 # start with classical evenness estimates:
-XITS$alpha_otu97.5$evenness  <- microbiome::evenness(t(XITS$X_otu97.5))
-X16S$alpha_otu97.5$evenness  <- microbiome::evenness(t(X16S$X_otu97.5))
+XITS$alpha_otu97.5$evenness  <- microbiome::evenness(t(XITS$x_otu97.5))
+X16S$alpha_otu97.5$evenness  <- microbiome::evenness(t(X16S$x_otu97.5))
 
 
 ```
 
-```{r alpha diversity evenness plots, echo=T,  eval=T, cache=T,fig.width=9}
+```{r alpha diversity evenness plots, echo=T,  eval=T, cache=F,fig.width=9}
 # First evenness plots for ITS:
 
 eve_all <- merge(XITS$alpha_otu97.5$evenness,X16S$alpha_otu97.5$evenness,by="row.names",suffixes=c("ITS","16S"))
@@ -1147,15 +1146,15 @@ rm(eve_all)
 * Notice how for 16S, T3T is completely dominated by one OTU.
 * There are no significant correlations between dominance measures between ITS and 16S
 
-```{r alpha diversity dominance, echo=T,  eval=F, cache=T,fig.width=9}
+```{r alpha diversity dominance, echo=T,  eval=T, cache=F,fig.width=9}
 
 # start with classical dominance estimates:
-XITS$alpha_otu97.5$dominance  <- microbiome::dominance(t(XITS$X_otu97.5))[,-1] # exclude dbp, which is essentially the same as "relative dominance"
-X16S$alpha_otu97.5$dominance  <- microbiome::dominance(t(X16S$X_otu97.5))[,-1]
+XITS$alpha_otu97.5$dominance  <- microbiome::dominance(t(XITS$x_otu97.5))[,-1] # exclude dbp, which is essentially the same as "relative dominance"
+X16S$alpha_otu97.5$dominance  <- microbiome::dominance(t(X16S$x_otu97.5))[,-1]
 
 ```
 
-```{r alpha diversity dominance plots, echo=T,  eval=T, cache=T,fig.width=9}
+```{r alpha diversity dominance plots, echo=T,  eval=T, cache=F,fig.width=9}
 
 dom_all <- merge(XITS$alpha_otu97.5$dominance,X16S$alpha_otu97.5$dominance,by="row.names",suffixes=c("ITS","16S"))
 
@@ -1192,15 +1191,15 @@ rm(dom_all)
 And finally rarity. No interesting trends or correlations here either. 
 
 
-```{r alpha diversity rarity, echo=T,  eval=F, cache=T,fig.width=9}
+```{r alpha diversity rarity, echo=T,  eval=T, cache=F,fig.width=9}
 
 # start with classical rarity estimates:
-XITS$alpha_otu97.5$rarity  <- microbiome::rarity(t(XITS$X_otu97.5))
-X16S$alpha_otu97.5$rarity  <- microbiome::rarity(t(X16S$X_otu97.5))
+XITS$alpha_otu97.5$rarity  <- microbiome::rarity(t(XITS$x_otu97.5))
+X16S$alpha_otu97.5$rarity  <- microbiome::rarity(t(X16S$x_otu97.5))
 
 ```
 
-```{r alpha diversity rarity plots, echo=T,  eval=T, cache=T,fig.width=9}
+```{r alpha diversity rarity plots, echo=T,  eval=T, cache=F,fig.width=9}
 
 
 rar_all <- merge(XITS$alpha_otu97.5$rarity,X16S$alpha_otu97.5$rarity,by="row.names",suffixes=c("ITS","16S"))
@@ -1247,17 +1246,17 @@ Can you please double check which one is preferred and why?
 First a Bray Curtis distance based on the OTUS. Notice that the plots are NMDS. They separate between sites extremely well for ITS. This needs more reflection because it's super simple and by far the nicest beta diversity plot. We could also consider doing the same with a 95% identity cutoff for OTU's, which should be entirely feasible with the functions defined above. 
 
 
-```{r Bray Curtis ITS, echo=T,  eval=T, fig.width=8, fig.height=8}
+```{r Bray Curtis ITS 2, echo=T,  eval=T, fig.width=8, fig.height=8}
 
-XITS$beta_otu97.5$BCdist <- vegan::vegdist(XITS$X_otu97.5, method = "bray")
+XITS$beta_otu97.5$BCdist <- vegan::vegdist(XITS$x_otu97.5, method = "bray")
 FUNS$betaplot(XITS$beta_otu97.5$BCdist,2,"ITS: NMDS based on Bray Curtis distance")
 
 ```
 
 For 16S, it looks less nice. I'm sure the culprit is the outliers A5T and T3T (see further). Try running it again without them. 
 
-```{r Bray Curtis 16S, echo=T,  eval=T, fig.width=8, fig.height=8}
-X16S$beta_otu97.5$BCdist <- vegan::vegdist(X16S$X_otu97.5, method = "bray")
+```{r Bray Curtis 16S 2, echo=T,  eval=T, fig.width=8, fig.height=8}
+X16S$beta_otu97.5$BCdist <- vegan::vegdist(X16S$x_otu97.5, method = "bray")
 FUNS$betaplot(X16S$beta_otu97.5$BCdist,2,"16S: NMDS based on Bray Curtis distance")
 
 ```
@@ -1268,6 +1267,8 @@ FUNS$betaplot(X16S$beta_otu97.5$BCdist,2,"16S: NMDS based on Bray Curtis distanc
 
 Next, we generate distance matrices and neighbour joining trees for UniFrac. I have put the entire thing in one function, with two inputs: the dataset (XITS or X16S), and the k value. It calculates 3 kinds of distance matrix based on k-mer distance (euclidean, cosine distance and edgar). Next, it generates neighbour joining trees. With these trees and the untransformed count matrix, it calculates weighted and unweighted unifrac. 
 
+
+Caution: this function was still written for an object that would contain a single count table called "X". It performs OK still, as long as the order of features (columns) is unchaged between "X" (the original count matrix) and "x" (the count matrix with merged samples and outliers removed)
 
 ```{r distance matrices and nj trees, echo = T, eval = F}
 
@@ -1323,16 +1324,8 @@ And finally the taxonomy part. Nothing much to say here for now, because it stil
 
 ### Assign taxonomy: 
 
-XITS$taxa <- assignTaxonomy(colnames(XITS$X), "sh_general_release_dynamic_s_all_04.04.2024.fasta",verbose=T,multithread=20)
-X16S$taxa <- assignTaxonomy(colnames(X16S$X), "silva_nr99_v138.1_wSpecies_train_set.fa.gz",verbose=T,multithread=20)
-
-```
-
-Next, we define a function to barplot taxonomic data for all, or for a subset of samples:
-
-
-```{r Taxonomy barplot function, echo = T, eval = F}
-
+XITS$taxa <- assignTaxonomy(colnames(XITS$x), "~/db/sh_general_release_dynamic_s_all_04.04.2024.fasta",verbose=T,multithread=20)
+X16S$taxa <- assignTaxonomy(colnames(X16S$x), "~/db/silva_nr99_v138.1_wSpecies_train_set.fa.gz",verbose=T,multithread=20)
 
 ```
 
@@ -1341,9 +1334,8 @@ And some barplots on the class level as an illustration:
 
 ```{r Taxonomy barplots, echo = T, eval = T, warnings=F, message=F, fig.width=12, fig.height=10}
 
-FUNS$barplot_function(XITS$X,XITS$taxa,"Class",samples=c(1:44),other=12)
-
-FUNS$barplot_function(X16S$X,X16S$taxa,"Class",samples=c(1:51),other=12)
+FUNS$barplot_function(XITS$x,XITS$taxa,"Class",samples=c(1:35),other=12)
+FUNS$barplot_function(X16S$x,X16S$taxa,"Class",samples=c(1:39),other=12)
 
 
 ```
