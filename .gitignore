@@ -1,0 +1,7 @@
+# Ignore all files and folders by default
+*
+
+# Explicitly allow the src folder and the .Rproj file
+!src/
+!metabarcoding.Rproj
+!.gitignore
