@@ -2,6 +2,6 @@
 *
 
 # Explicitly allow the src folder and the .Rproj file
-!src/
+!src
 !metabarcoding.Rproj
 !.gitignore
