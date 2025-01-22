@@ -1,0 +1,1 @@
+FUNS$get.sample.name      <- function(fname) strsplit(basename(fname), "_")[[1]][1]
