@@ -134,4 +134,73 @@ FUNS$learnErrorsBalanced <- function(filt_files,
 }
 
 
+FUNS$plot_asv_length_abundance <- function(seqtab, META, mock_column = "mock", main = "ASV abundance vs. length") {
+  require(scales)
+  
+  asv_seqs <- getSequences(seqtab)
+  asv_lengths <- nchar(asv_seqs)
+  asv_abundance <- colSums(seqtab)
+  asv_prevalence <- colSums(seqtab > 0)
+  
+  # Identify which samples are mock
+  mock_samples <- which(META[[mock_column]])
+  mock_asvs <- colSums(seqtab[mock_samples, , drop = FALSE]) > 0
+  
+  # Assign colors
+  col_vec <- rep(alpha("blue", 0.4), length(asv_seqs))          # default: in >1 sample
+  col_vec[asv_prevalence == 1] <- alpha("red", 0.4)             # found in 1 sample only
+  col_vec[mock_asvs] <- alpha("green", 0.6)                     # in mock samples
+  
+  # Plot
+  plot(asv_lengths, asv_abundance,
+       xlab = "ASV length (bp)",
+       ylab = "Total abundance",
+       main = main,
+       log = "y",
+       col = col_vec,
+       pch = 20)
+  
+  legend("topleft", legend = c("Mock ASVs", "Single-sample ASVs", "Multi-sample ASVs"),
+         col = c(alpha("green", 0.6), alpha("red", 0.4), alpha("blue", 0.4)),
+         pch = 20, bty = "n")
+}
+
+
+# Helper: aggregate counts by soil_sample
+FUNS$aggregate_counts_by_sample <- function(seqtab, meta) {
+  meta$soil_sample <- factor(meta$soil_sample, levels = unique(meta$soil_sample))
+  agg_counts <- rowsum(seqtab, group = meta$soil_sample)
+  return(agg_counts)
+}
+
+# Helper: split TSE into mock and main + remove mock-only ASVs
+FUNS$split_TSE_remove_mockASVs <- function(counts, meta) {
+  is_mock <- meta$mock
+  mock_counts <- counts[is_mock, , drop = FALSE]
+  main_counts <- counts[!is_mock, , drop = FALSE]
+  
+  # Drop ASVs only found in mocks
+  main_counts <- main_counts[, colSums(main_counts)>0, drop = FALSE]
+  mock_counts <- mock_counts[, colSums(mock_counts)>0, drop = FALSE]  
+  
+  list(
+    main = list(counts = main_counts, meta = meta[!is_mock, ]),
+    mock = list(counts = mock_counts, meta = meta[is_mock, ])
+  )
+}
+
+# ---- Create TSEs ----
+FUNS$make_TSE <- function(counts, meta, prefix) {
+  tse <- TreeSummarizedExperiment(
+    assays = list(counts = t(counts)),
+    colData = DataFrame(meta),
+    rowData = DataFrame(sequence = colnames(counts))
+  )
+  # Rename ASVs and store sequences
+  asv_seqs <- rownames(tse)
+  asv_ids <- paste0(prefix, "_asv", seq_along(asv_seqs))
+  rownames(tse) <- asv_ids
+  rowData(tse)$sequence <- asv_seqs
+  return(tse)
+}
 
