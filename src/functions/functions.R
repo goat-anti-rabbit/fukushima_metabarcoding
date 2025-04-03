@@ -204,3 +204,63 @@ FUNS$make_TSE <- function(counts, meta, prefix) {
   return(tse)
 }
 
+
+
+
+FUNS$getN     <- function(x) sum(getUniques(x))
+
+
+FUNS$plot_read_retention <- function(track_df, pdf_file = NULL, title_prefix = "") {
+  library(data.table)
+  library(ggplot2)
+  
+  # Convert to data.table if needed
+  track_dt <- as.data.table(track_df, keep.rownames = "sample")
+  
+  # Melt to long format
+  track_long <- melt(track_dt, id.vars = "sample", variable.name = "step", value.name = "reads")
+  
+  # Normalize to percent of input
+  track_long[, input_reads := reads[step == "input"], by = sample]
+  track_long[, pct := 100 * reads / input_reads]
+  
+  # Plot 1: Absolute read counts with labels
+  p1 <- ggplot(track_long, aes(x = step, y = reads, group = sample)) +
+    geom_line(alpha = 0.5, color = "steelblue") +
+    geom_point(size = 0.8, color = "steelblue") +
+    geom_text(
+      data = track_long[step == "nonchim"],
+      aes(label = sample),
+      hjust = 0, nudge_x = 0.1, size = 2
+    ) +
+    labs(title = paste(title_prefix, "Read Retention Across Pipeline (Absolute)"),
+         x = "Pipeline Step", y = "Read Count") +
+    theme_minimal() +
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      plot.margin = margin(5.5, 60, 5.5, 5.5)
+    )
+  
+  # Plot 2: Percentage of input
+  p2 <- ggplot(track_long, aes(x = step, y = pct, group = sample)) +
+    geom_line(alpha = 0.5, color = "steelblue") +
+    geom_point(size = 0.8, color = "steelblue") +
+    scale_y_continuous(limits = c(0, 110)) +
+    labs(title = paste(title_prefix, "Read Retention Across Pipeline (% of Input)"),
+         x = "Pipeline Step", y = "% of Input Reads") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  
+  # Save to PDF if filename provided
+  if (!is.null(pdf_file)) {
+    pdf(pdf_file, width = 12, height = 8)
+    print(p1)
+    print(p2)
+    dev.off()
+  }
+  
+  return(list(abs = p1, pct = p2))
+}
+
+
+
