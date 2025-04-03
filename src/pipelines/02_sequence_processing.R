@@ -300,6 +300,12 @@ X16S$out <- filterAndTrim(
 X16S$errF <- FUNS$learnErrorsBalanced(X16S$filtFs, n_reads_per_sample = 12000, nbases = 1.5e8, multithread = 20, MAX_CONSIST = 30)
 X16S$errR <- FUNS$learnErrorsBalanced(X16S$filtRs, n_reads_per_sample = 12000, nbases = 1.5e8, multithread = 20, MAX_CONSIST = 30)
 
+pdf("results/figures/02_errorprofile_estimates_16s.pdf", width = 10, height = 10)
+par(mfrow = c(1, 2))
+plotErrors(X16S$errF, nominalQ = TRUE)
+plotErrors(X16S$errR, nominalQ = TRUE)
+dev.off()
+
 # Dereplicate
 X16S$derepFs <- derepFastq(X16S$filtFs)
 X16S$derepRs <- derepFastq(X16S$filtRs)
@@ -329,6 +335,14 @@ print(sum(X16S$seqtab.nochim) / sum(X16S$seqtab))
 pdf("results/figures/02_16S_ASV_abundance_vs_length.pdf", width = 7, height = 6)
 FUNS$plot_asv_length_abundance(X16S$seqtab.nochim, X16S$META)
 dev.off()
+
+### Important: monitor drop-off at each step of the pipeline !!!
+X16S$track <- cbind(X16S$out, sapply(X16S$dadaFs, FUNS$getN), sapply(X16S$dadaRs, FUNS$getN), sapply(X16S$mergers, FUNS$getN), rowSums(X16S$seqtab.nochim))
+colnames(X16S$track) <- c("input", "filtered", "denoisedF", "denoisedR", "merged", "nonchim")
+
+FUNS$plot_read_retention(X16S$track, pdf_file = "results/figures/02_read_retention_16S_pipeline.pdf", title_prefix = "16S")
+
+
 # Sequences between 380 and 390 seem to be archaons (BLASTn 100% identity to "uncultured archaeon 16S")
 # The shorter asv's are a bit more vague
 
@@ -356,6 +370,13 @@ XITS$out <- filterAndTrim(
 XITS$errF <- FUNS$learnErrorsBalanced(XITS$filtFs, n_reads_per_sample = 12000, nbases = 1.5e8, multithread = 20, MAX_CONSIST = 30)
 XITS$errR <- FUNS$learnErrorsBalanced(XITS$filtRs, n_reads_per_sample = 12000, nbases = 1.5e8, multithread = 20, MAX_CONSIST = 30)
 
+pdf("results/figures/02_errorprofile_estimates_its.pdf", width = 10, height = 10)
+par(mfrow = c(1, 2))
+plotErrors(XITS$errF, nominalQ = TRUE)
+plotErrors(XITS$errR, nominalQ = TRUE)
+dev.off()
+
+
 # Dereplicate
 XITS$derepFs <- derepFastq(XITS$filtFs)
 XITS$derepRs <- derepFastq(XITS$filtRs)
@@ -374,6 +395,13 @@ rownames(XITS$seqtab) <- XITS$sample.names
 # Chimera removal
 XITS$seqtab.nochim <- removeBimeraDenovo(XITS$seqtab, method = "consensus", multithread = 12, verbose = TRUE)
 rownames(XITS$seqtab.nochim) <- XITS$sample.names
+
+### Monitor drop-off at each step of the pipeline !!!
+XITS$track <- cbind(XITS$out, sapply(XITS$dadaFs, FUNS$getN), sapply(XITS$dadaRs, FUNS$getN), sapply(XITS$mergers, FUNS$getN), rowSums(XITS$seqtab.nochim))
+colnames(XITS$track) <- c("input", "filtered", "denoisedF", "denoisedR", "merged", "nonchim")
+
+FUNS$plot_read_retention(XITS$track, pdf_file = "results/figures/02_read_retention_ITS_pipeline.pdf", title_prefix = "ITS")
+
 
 pdf("results/figures/02_ITS_ASV_abundance_vs_length.pdf", width = 7, height = 6)
 FUNS$plot_asv_length_abundance(XITS$seqtab.nochim, XITS$META)
