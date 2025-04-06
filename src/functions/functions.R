@@ -263,4 +263,146 @@ FUNS$plot_read_retention <- function(track_df, pdf_file = NULL, title_prefix = "
 }
 
 
+# Helper to calculate % identification at taxonomic ranks
+summarize_taxonomy <- function(tse, ranks = c("order", "family", "genus", "species")) {
+  tax <- as.data.frame(rowData(tse))
+  
+  if (!all(ranks %in% colnames(tax))) {
+    stop("Not all requested ranks are present in rowData.")
+  }
+  
+  n_total <- nrow(tax)
+  summary <- sapply(ranks, function(rank) {
+    sum(!is.na(tax[[rank]]) & tax[[rank]] != "") / n_total * 100
+  })
+  return(round(summary, 1))
+}
+
+# Helper to calculate % identification at taxonomic ranks
+FUNS$summarize_taxonomy <- function(tse, ranks = c("Order", "Family", "Genus", "Species")) {
+  tax <- as.data.frame(rowData(tse))
+  
+  if (!all(ranks %in% colnames(tax))) {
+    stop("Not all requested ranks are present in rowData.")
+  }
+  
+  n_total <- nrow(tax)
+  summary <- sapply(ranks, function(rank) {
+    sum(!is.na(tax[[rank]]) & tax[[rank]] != "") / n_total * 100
+  })
+  return(round(summary, 1))
+}
+
+
+### Function that compares taxonomy assignments in two similar TSE objects in which 
+### taxonomy assignment has been completed with different settings
+### Selects n sequences at tax_level that have an assignment in one, but not in the other TSE object
+### Outputs them to a fasta file such that they can be investigated with e.g. BLASTn
+
+
+FUNS$sample_taxonomic_gain_ASVs <- function(strict_TSE, lenient_TSE, tax_level = "Genus", n = 20, outfile = "sampled_gain.fasta") {
+  stopifnot(tax_level %in% colnames(rowData(strict_TSE)))
+  
+  strict_tax  <- rowData(strict_TSE)[[tax_level]]
+  lenient_tax <- rowData(lenient_TSE)[[tax_level]]
+  
+  # Find ASVs with NA in strict but not in lenient taxonomy
+  gained_tax <- is.na(strict_tax) & !is.na(lenient_tax)
+  gained_ids <- rownames(strict_TSE)[gained_tax]
+  gained_seqs <- rowData(lenient_TSE)$sequence[gained_tax]
+  
+  # Spread across taxonomic space using kmer distance clustering
+  kmers <- Biostrings::oligonucleotideFrequency(Biostrings::DNAStringSet(gained_seqs), width = 5)
+  dists <- dist(kmers)
+  clusters <- cutree(hclust(dists), k = min(n, length(gained_seqs)))
+  #print(table(clusters))
+  
+  # Sample one ASV per cluster (or fewer if n > total)
+  sampled_indices   <- unlist(lapply(unique(clusters), function(cl) {
+    cluster_indices <- which(clusters == cl)
+    sample(cluster_indices, 1)
+  }))
+  
+  sampled_seqs <- rowData(lenient_TSE)$sequence[sampled_indices]
+  
+  # Make informative headers
+  tax_levels <- c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species")
+  header_strings <- vapply(sampled_indices, function(id) {
+    taxonomy <- unlist(rowData(lenient_TSE)[id, tax_levels])
+    taxonomy <- taxonomy[!is.na(taxonomy)]
+    paste(unlist(rownames(rowData(lenient_TSE))[id]), paste(taxonomy, collapse = "; "), sep = " | ")
+  }, character(1))
+  
+  names(sampled_seqs) <- header_strings
+  
+  # Write to FASTA
+  Biostrings::writeXStringSet(
+    Biostrings::DNAStringSet(sampled_seqs),
+    filepath = outfile
+  )
+  
+  message(length(sampled_indices), " sequences written to ", outfile)
+  invisible(sampled_indices)
+}
+
+FUNS$sample_taxonomic_gain_ASVs <- function(strict_TSE, lenient_TSE, tax_level = "Genus", n = 20, outfile = "sampled_gain.fasta") {
+  # Safety checks
+  stopifnot(tax_level %in% colnames(rowData(strict_TSE)))
+  stopifnot(tax_level %in% colnames(rowData(lenient_TSE)))
+  
+  # Define hierarchy
+  tax_hierarchy <- c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species")
+  target_idx <- match(tax_level, tax_hierarchy)
+  if (is.na(target_idx)) stop("Invalid taxonomic level.")
+  
+  higher_levels <- tax_hierarchy[1:(target_idx - 1)]
+  
+  # Extract taxonomy columns
+  strict_tax_all  <- rowData(strict_TSE)[, c(higher_levels, tax_level), drop = FALSE]
+  lenient_tax_all <- rowData(lenient_TSE)[, c(higher_levels, tax_level), drop = FALSE]
+  
+  # Keep ASVs that match higher levels, and gain assignment at the target level
+  keep <- apply(strict_tax_all[, higher_levels, drop=FALSE], 1, function(x) all(!is.na(x))) &
+    apply(lenient_tax_all[, higher_levels, drop=FALSE], 1, function(x) all(!is.na(x))) &
+    is.na(strict_tax_all[[tax_level]]) &
+    !is.na(lenient_tax_all[[tax_level]])
+  
+  if (sum(keep) == 0) stop("No ASVs meet the gain-at-this-level criterion.")
+  
+  gained_ids <- rownames(strict_TSE)[keep]
+  gained_seqs <- rowData(lenient_TSE)$sequence[keep]
+  
+  # Spread across taxonomic space using k-mer distance clustering
+  kmers <- Biostrings::oligonucleotideFrequency(Biostrings::DNAStringSet(gained_seqs), width = 5)
+  dists <- dist(kmers)
+  clusters <- cutree(hclust(dists), k = min(n, length(gained_seqs)))
+  
+  sampled_indices <- unlist(lapply(unique(clusters), function(cl) {
+    cluster_indices <- which(clusters == cl)
+    sample(cluster_indices, 1)
+  }))
+  
+  sampled_seqs <- rowData(lenient_TSE)$sequence[keep][sampled_indices]
+  
+  # Build informative headers
+  tax_levels <- tax_hierarchy
+  header_strings <- vapply(sampled_indices, function(idx) {
+    tax_row <- rowData(lenient_TSE)[keep, , drop=FALSE][idx, tax_levels]
+    tax_row_vec <- as.vector(as.matrix(tax_row))
+    tax_row_vec <- tax_row_vec[!is.na(tax_row_vec)]
+    asv_id <- rownames(strict_TSE)[keep][idx]
+    paste0(asv_id, " | ", paste(tax_row_vec, collapse = "; "))
+  }, character(1))
+  
+  names(sampled_seqs) <- header_strings
+  
+  # Write FASTA
+  Biostrings::writeXStringSet(
+    Biostrings::DNAStringSet(sampled_seqs),
+    filepath = outfile
+  )
+  
+  message(length(sampled_seqs), " sequences written to ", outfile)
+  invisible(sampled_indices)
+}
 
