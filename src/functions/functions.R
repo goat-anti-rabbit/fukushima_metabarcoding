@@ -1,20 +1,5 @@
 FUNS <- list()
 
-# Count the reads in a fq.gz file based on filename
-FUNS$count_reads <- function(file_path) {
-  if (file.exists(file_path)) {
-    fq <- ShortRead::FastqStreamer(file_path, n = 1e6)
-    count <- 0
-    while (length(reads <- ShortRead::yield(fq)) > 0) {
-      count <- count + length(reads)
-    }
-    close(fq)
-    return(count)
-  } else {
-    return(NA)
-  }
-}
-
 FUNS$get.sample.name      <- function(fname) strsplit(basename(fname), "_")[[1]][1]
 
 # Helper function to save paired quality profiles in one PDF
@@ -49,8 +34,8 @@ FUNS$save_paired_quality_profiles <- function(forward_files, reverse_files, libr
 FUNS$allOrients <- function(primer) {
   require("Biostrings")
   dna <- DNAString(primer)  
-  orients <- c(Forward = dna, Complement = Biostrings::complement(dna), Reverse = Biostrings::reverse(dna),
-               RevComp = Biostrings::reverseComplement(dna))
+  orients <- c("5`3`" = dna, comp = Biostrings::complement(dna), "3`5`" = Biostrings::reverse(dna),
+               rvcmp = Biostrings::reverseComplement(dna))
   return(sapply(orients, toString))  
 }
 
@@ -63,11 +48,12 @@ FUNS$primerHits <- function(primer, fn) {
   return(sum(nhits > 0))
 }
 
-# Takes a dataset (XITS or X16S), the name the reads fw, the name of the reads rev
+# Takes a dataset (XITS or X16S), the name of the reads fw, the name of the reads rev
 # This function generates a table in which we count the number of reads that contain a primer in any direction. 
-# The column names are a bit of a mess:
-# Upper case FW or RV: whether we are looking for the forward or the reverse primers
-# Lower case fw or rv: whether we are looking into the forward or reverse reads (you can for example find forward primers in reverse reads in case of readthrough)
+# The column names:
+# R1 or R2: whether we are looking into the first (forward) or second (reverse) reads 
+# (you can for example find forward primers in reverse reads in case of readthrough)
+# FP or RP: whether we are looking for the forward primer or the reverse primer
 # The direction of the primer. Whether it's oriented the way it should, reversed, complemented or reverse complemented. 
 
 FUNS$generate_primer_summary <- function(dataset, fnFs_col, fnRs_col, multithread = 4) 
@@ -77,10 +63,10 @@ FUNS$generate_primer_summary <- function(dataset, fnFs_col, fnRs_col, multithrea
   registerDoParallel(cl)
   # Perform primer hits calculation in parallel
   primer_summary <- foreach(i = 1:length(dataset[[fnFs_col]]), .combine = rbind, .export=c("FUNS")) %dopar% {
-    c( FW.fw = sapply(dataset$FWD.orients, FUNS$primerHits, fn = dataset[[fnFs_col]][[i]]),
-       FW.rv = sapply(dataset$FWD.orients, FUNS$primerHits, fn = dataset[[fnRs_col]][[i]]),
-       RV.fw = sapply(dataset$REV.orients, FUNS$primerHits, fn = dataset[[fnFs_col]][[i]]),
-       RV.rv = sapply(dataset$REV.orients, FUNS$primerHits, fn = dataset[[fnRs_col]][[i]])
+    c( R1_FP = sapply(dataset$FWD.orients, FUNS$primerHits, fn = dataset[[fnFs_col]][[i]]),
+       R1_RP = sapply(dataset$REV.orients, FUNS$primerHits, fn = dataset[[fnFs_col]][[i]]),
+       R2_FP = sapply(dataset$FWD.orients, FUNS$primerHits, fn = dataset[[fnRs_col]][[i]]),
+       R2_RP = sapply(dataset$REV.orients, FUNS$primerHits, fn = dataset[[fnRs_col]][[i]])
     )
   }
   
