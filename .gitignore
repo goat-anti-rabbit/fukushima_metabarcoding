@@ -1,0 +1,19 @@
+# Track code, config, small metadata and manifests; keep bulk data and results out of git.
+*.RData
+*.Rdata
+*.rds
+*.qza
+*.fq.gz
+*.fastq.gz
+*.fasta
+*.html
+.Rproj.user/
+.Rhistory
+archive/
+results/
+data/reads_*/
+db/*
+!db/README.md
+renv/library/
+renv/staging/
+renv/local/
