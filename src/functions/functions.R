@@ -495,3 +495,55 @@ FUNS$cluster_otus <- function(tse, ids = c(0.97, 0.98, 0.99), threads = 20) {
   if (anyNA(as.matrix(result))) stop("vsearch did not place every ASV in an OTU.")
   result
 }
+
+
+# Filters a TSE for a downstream analysis. Returns a new TSE. The input object is not changed.
+# Step 1 removes ASVs:
+#   - ASVs with fewer than min_reads reads in total, summed over all samples
+#   - ASVs found (at least 1 read) in fewer than min_samples samples
+#   Both are counted over the samples in the TSE as it is given. So remove samples first, then filter.
+#   The defaults (2 and 1) remove nothing from the objects of 03a and 03b, which only contain ASVs with 2 reads or more.
+# Step 2 removes no ASVs. It replaces taxon names by `label`:
+#   - when the confidence of that rank is below min_confidence
+#   - when the name or its confidence is missing
+#   - when the name itself means "no name". Only SILVA has such names in our objects: "Unknown Family", and
+#     "Incertae Sedis" without the name of a higher rank (the same label in unrelated lineages).
+#     GG2 and UNITE leave such ranks empty (NA), so they are covered by the rule above.
+#   So after this step, "no name" is always `label`, never NA.
+#   The confidence is the bootstrap value of dada2::assignTaxonomy (0-100): in how many of 100 tries, each with a
+#   random eighth of the ASV's k-mers, the classifier chose the same taxon at that rank.
+#   It never rises towards the lower ranks. So when a name is replaced for a low confidence,
+#   the names below it are replaced too.
+#   Each name is checked against the confidence of its own database:
+#     family         with gg2_family_confidence (16S) or unite_family_confidence (ITS)
+#     silva_family   with silva_family_confidence
+#     unite_s_family with unite_s_family_confidence
+#   The confidence columns themselves are kept as they are.
+# The read totals in the colData are updated (FUNS$update_reads). The settings are stored in metadata(tse)$filter.
+# Example: tse80 <- FUNS$filter_tse(readRDS("results/objects/TSE_16S_taxonomy.rds"), min_samples = 3)
+FUNS$filter_tse <- function(tse, min_reads = 2, min_samples = 1, min_confidence = 80, label = "unclassified") {
+  counts <- SummarizedExperiment::assay(tse, "counts")
+  keep   <- rowSums(counts) >= min_reads & rowSums(counts > 0) >= min_samples
+  message("filter_tse: kept ", sum(keep), " of ", length(keep), " ASVs, ",
+          round(100 * sum(counts[keep, ]) / sum(counts), 2), " % of the reads")
+  tse <- tse[keep, ]
+
+  rd <- SummarizedExperiment::rowData(tse)
+  for (conf_col in grep("_confidence$", names(rd), value = TRUE)) {
+    # Name column of this confidence column. It is silva_family for silva_family_confidence,
+    # but family (without prefix) for gg2_family_confidence and unite_family_confidence.
+    name_col <- sub("_confidence$", "", conf_col)
+    if (!name_col %in% names(rd)) name_col <- sub("^[^_]+_", "", name_col)
+    if (!name_col %in% names(rd)) stop("No name column found for ", conf_col)
+    low <- is.na(rd[[name_col]]) | is.na(rd[[conf_col]]) | rd[[conf_col]] < min_confidence |
+      rd[[name_col]] %in% c("Unknown Family", "Incertae Sedis")
+    rd[[name_col]][low] <- label
+  }
+  SummarizedExperiment::rowData(tse) <- rd
+
+  tse <- FUNS$update_reads(tse)
+  S4Vectors::metadata(tse)$filter <- list(min_reads = min_reads, min_samples = min_samples,
+                                          min_confidence = min_confidence, label = label,
+                                          asvs_before = length(keep), asvs_after = sum(keep))
+  tse
+}
